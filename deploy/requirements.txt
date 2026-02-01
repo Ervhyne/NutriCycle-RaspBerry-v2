@@ -1,0 +1,24 @@
+# Tested with Python 3.11 (use .venv311 on Windows)
+ultralytics
+opencv-python
+numpy
+
+# Optional / deployment-only
+# onnxruntime  # required to run .onnx models. If pip install fails on Windows, use conda: `conda install -c conda-forge onnxruntime`
+
+# Optional (trackers) - may require build tools on Windows
+# lap  # use `conda install -c conda-forge lap` or a prebuilt wheel if pip fails
+
+# WebRTC streaming (for webrtc_server.py)
+# Required: aiortc, aiohttp, av
+# Install guide:
+# - Windows (Python 3.11 recommended): pip install aiortc aiohttp av
+#   If 'av' fails, use conda: conda install -c conda-forge av
+# - Raspberry Pi: pip install aiortc aiohttp av (may need system libs - see README)
+aiortc
+aiohttp
+av  # PyAV - if pip install fails on Windows, use: conda install -c conda-forge av
+
+# MQTT support for detection alerts
+paho-mqtt
+

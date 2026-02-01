@@ -1,0 +1,10 @@
+# Ignore local venvs
+.venv/
+.venv311/
+
+# Typical Python ignores
+__pycache__/
+*.pyc
+*.pyo
+.env
+

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NutriCycle Live Detection (WebRTC)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            margin-bottom: 10px;
+            color: #4CAF50;
+        }
+        .info {
+            margin-bottom: 20px;
+            text-align: center;
+            color: #aaa;
+        }
+        #video-container {
+            position: relative;
+            max-width: 100%;
+            background: #000;
+            border: 2px solid #4CAF50;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        #videoElement {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        #status {
+            margin-top: 20px;
+            padding: 10px 20px;
+            background: #333;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .status-connected {
+            color: #4CAF50;
+        }
+        .status-connecting {
+            color: #FFC107;
+        }
+        .status-error {
+            color: #f44336;
+        }
+        button {
+            margin-top: 20px;
+            padding: 10px 30px;
+            font-size: 16px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <h1>🚀 NutriCycle Live Detection</h1>
+    <div class="info">WebRTC streaming with YOLO inference</div>
+    
+    <div id="video-container">
+        <video id="videoElement" autoplay playsinline muted></video>
+    </div>
+    
+    <div id="status" class="status-connecting">Connecting...</div>
+    <button id="reconnectBtn" style="display: none;">Reconnect</button>
+    
+    <script>
+        const videoElement = document.getElementById('videoElement');
+        const statusDiv = document.getElementById('status');
+        const reconnectBtn = document.getElementById('reconnectBtn');
+        
+        let pc = null;
+        
+        function updateStatus(message, type = 'connecting') {
+            statusDiv.textContent = message;
+            statusDiv.className = `status-${type}`;
+        }
+        
+        async function startConnection() {
+            updateStatus('Connecting to server...', 'connecting');
+            reconnectBtn.style.display = 'none';
+            
+            try {
+                // Create peer connection with STUN servers for internet connectivity
+                pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' },
+                        { urls: 'stun:stun.relay.metered.ca:80' }
+                    ]
+                });
+                
+                // Handle incoming tracks
+                pc.addEventListener('track', (evt) => {
+                    console.log('Received track:', evt.track.kind, evt.streams.length);
+                    if (evt.track.kind === 'video') {
+                        const stream = evt.streams[0];
+                        videoElement.srcObject = stream;
+                        console.log('Video srcObject set, attempting play...');
+                        
+                        // Force play in case autoplay is blocked
+                        videoElement.play().then(() => {
+                            console.log('Video playing successfully');
+                            updateStatus('✅ Connected - streaming live', 'connected');
+                        }).catch(err => {
+                            console.error('Video play failed:', err);
+                            updateStatus('⚠️ Video received but play blocked - click to play', 'error');
+                        });
+                    }
+                });
+                
+                // Handle connection state
+                pc.addEventListener('connectionstatechange', () => {
+                    console.log('Connection state:', pc.connectionState);
+                    if (pc.connectionState === 'connected') {
+                        updateStatus('✅ Connected - streaming live', 'connected');
+                    } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+                        updateStatus('❌ Connection lost', 'error');
+                        reconnectBtn.style.display = 'block';
+                    } else if (pc.connectionState === 'connecting') {
+                        updateStatus('Connecting...', 'connecting');
+                    }
+                });
+                
+                // Handle ICE connection state
+                pc.addEventListener('iceconnectionstatechange', () => {
+                    console.log('ICE connection state:', pc.iceConnectionState);
+                });
+                
+                // Add transceiver for receiving video
+                pc.addTransceiver('video', { direction: 'recvonly' });
+                
+                // Create offer
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                
+                // Send offer to server
+                const response = await fetch('/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sdp: pc.localDescription.sdp,
+                        type: pc.localDescription.type
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Server returned ${response.status}`);
+                }
+                
+                const answer = await response.json();
+                await pc.setRemoteDescription(new RTCSessionDescription(answer));
+                
+                updateStatus('Waiting for stream...', 'connecting');
+                
+            } catch (error) {
+                console.error('Connection error:', error);
+                updateStatus(`❌ Error: ${error.message}`, 'error');
+                reconnectBtn.style.display = 'block';
+            }
+        }
+        
+        reconnectBtn.addEventListener('click', () => {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            videoElement.srcObject = null;
+            startConnection();
+        });
+        
+        // Auto-start on page load
+        startConnection();
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (pc) {
+                pc.close();
+            }
+        });
+    </script>
+</body>
+</html>
