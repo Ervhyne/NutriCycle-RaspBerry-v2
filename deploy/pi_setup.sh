@@ -62,15 +62,29 @@ echo "If you plan to use tracker packages (ByteTrack/BotSort) and need 'lap', co
 # Create models dir
 mkdir -p models
 
+# Copy trained models from AI-Model to deploy/models
+echo "Copying trained models to deploy/models/"
+if [ -f "../AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt" ]; then
+  cp "../AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt" models/best.pt
+  echo "✓ best.pt copied"
+else
+  echo "⚠ Warning: best.pt not found in AI-Model/"
+fi
+
+if [ -f "../AI-Model/runs/detect/nutricycle_foreign_only/weights/best.onnx" ]; then
+  cp "../AI-Model/runs/detect/nutricycle_foreign_only/weights/best.onnx" models/best.onnx
+  echo "✓ best.onnx copied"
+else
+  echo "ℹ Info: best.onnx not found (optional)"
+fi
+
 cat <<'EOF'
 
 === Next steps ===
-- Copy your ONNX model into deploy/models/best.onnx (example):
-  scp AI-Model/runs/detect/nutricycle_foreign_only/weights/best.onnx pi@raspberrypi:/home/pi/nutricycle/deploy/models/best.onnx
-  # or transfer however you prefer
+- Models are ready in deploy/models/ (best.pt and/or best.onnx)
 
 - Quick run (camera):
-  python deploy/test_video.py --model deploy/models/best.onnx --source 0 --conf 0.25
+  python deploy/test_video.py --model deploy/models/best.pt --source 0 --conf 0.25
 
 - If onnxruntime failed above and you need it, try using conda/mamba or find a prebuilt wheel for your Pi's Python and CPU architecture.
 

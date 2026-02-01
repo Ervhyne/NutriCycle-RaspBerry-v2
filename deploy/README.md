@@ -15,13 +15,14 @@ Quick start (PowerShell):
    & ".\.venv311\Scripts\python.exe" -m pip install -r deploy/requirements.txt
    # Note: `onnxruntime` may not have Pip wheels for newer Python versions on Windows; see Notes below.
 
-2.5 Optional: download model to the device (recommended for Raspberry Pi)
-   - Use the included script to download the model to `deploy/models`:
-     ```bash
-     ./deploy/get_model.sh https://your-storage.example.com/best.onnx deploy/models/best.onnx
-     # Or on Windows PowerShell
-     .\deploy\get_model.ps1 -ModelUrl https://your-storage.example.com/best.onnx -DestPath deploy\models\best.onnx
-     ```
+2.5 For Raspberry Pi deployment (copy trained model to deploy folder):
+   ```bash
+   # On Raspberry Pi (or Linux):
+   ./deploy/setup_model.sh
+   
+   # On Windows PowerShell:
+   Copy-Item "AI-Model\runs\detect\nutricycle_foreign_only\weights\best.pt" "deploy\models\best.pt"
+   ```
    - Copy `.env.example` to `.env` and update values (MQTT broker, announce server, MACHINE_ID etc.)
      ```bash
      cp deploy/.env.example .env
@@ -108,7 +109,7 @@ Notes:
 
 - Windows camera tip: for more reliable USB camera access, prefer DirectShow (OpenCV backend `cv2.CAP_DSHOW`) and try different USB ports if a camera index doesn't work.
 
-- Consider adding `deploy/models/*` to `.gitignore` or track with Git LFS.
+- **Models are included in the repo** at `AI-Model/runs/detect/nutricycle_foreign_only/weights/` (best.pt, best.onnx). Use `setup_model.sh` to copy them to `deploy/models/` for Raspberry Pi deployment.
 
 ---
 

@@ -5,8 +5,9 @@ This guide shows how to prepare a Raspberry Pi (or similar Debian-based ARM devi
 ---
 
 ## Goals ✅
-- Recreate the repo layout on the Pi and install runtime dependencies
-- Download and place the model into `deploy/models/`
+- Clone the repo on the Pi (models are included)
+- Copy the trained model from `AI-Model/` to `deploy/models/` for easy access
+- Install runtime dependencies
 - Run the WebRTC server (`deploy/webrtc_server.py`) as a service
 - Make the device announce its public video URL and MachineID to your Node server
 - Publish detection events to MQTT and forward control commands from Node → ESP32
@@ -23,17 +24,20 @@ This guide shows how to prepare a Raspberry Pi (or similar Debian-based ARM devi
 ## Expected repo layout on the Pi (recommended)
 ```
 ~/nutricycle/                       # git clone here
+  AI-Model/
+    runs/
+      detect/
+        nutricycle_foreign_only/
+          weights/
+            best.pt                 # trained PyTorch model (included in repo)
+            best.onnx               # trained ONNX model (included in repo)
   deploy/
     webrtc_server.py
     test_video.py
-    get_model.sh
-    get_model.ps1
+    setup_model.sh                  # copies models from AI-Model/ to deploy/models/
     requirements.txt
     RASPBERRY_PI_INTEGRATION.md
-    ANNOUNCE.md
-    get_model.sh
-    models/                         # place best.onnx / best.pt here
-  AI-Model/                          # dataset / other stuff (ignored)
+    models/                         # run setup_model.sh to populate this
 ```
 
 ---
@@ -75,13 +79,15 @@ Notes:
 
 ---
 
-## 4) Download the model (place into `deploy/models/`)
-Options:
-- Use hosted model URL (recommended):
-  ```bash
-  ./deploy/get_model.sh https://storage.example.com/best.onnx deploy/models/best.onnx
-  ```
-- Or copy manually via `scp` or USB
+## 4) Copy the trained model to deploy/models/
+The models are included in the repo. Run the setup script to copy them:
+```bash
+./deploy/setup_model.sh
+```
+
+This copies:
+- `AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt` → `deploy/models/best.pt`
+- `AI-Model/runs/detect/nutricycle_foreign_only/weights/best.onnx` → `deploy/models/best.onnx` (if available)
 
 Confirm:
 ```bash
@@ -105,7 +111,7 @@ Important entries:
 ---
 
 ## 6) Run manually (smoke test)
-```bash
+```bashpt
 source venv/bin/activate
 python deploy/webrtc_server.py --model deploy/models/best.onnx --source 0 --machine-id RPI-001 --announce-server https://your-node.example.com/api/announce --mqtt-broker mqtt.example.com
 ```
@@ -129,7 +135,7 @@ WorkingDirectory=/home/pi/nutricycle
 EnvironmentFile=/home/pi/nutricycle/deploy/.env
 ExecStart=/home/pi/nutricycle/venv/bin/python \
   /home/pi/nutricycle/deploy/webrtc_server.py \
-  --model "deploy/models/best.onnx" --source 0 --machine-id "$MACHINE_ID" \
+  --model "deploy/models/best.pt" --source 0 --machine-id "$MACHINE_ID" \
   --announce-server "$ANNOUNCE_SERVER" --announce-interval "$ANNOUNCE_INTERVAL" \
   --mqtt-broker "$MQTT_BROKER" --mqtt-port "$MQTT_PORT" --mqtt-topic "$MQTT_TOPIC" --mqtt-esp-topic "$MQTT_ESP_TOPIC" \
   --control-token "$CONTROL_TOKEN"
@@ -183,7 +189,7 @@ Content-Type: application/json
 - Use `journalctl -u nutricycle.service -f` for logs
 - Rotate logs using `logrotate` if you add file-based logging
 - To update code: `git pull` (then restart service)
-- To update model: replace file at `deploy/models/best.onnx` and restart service
+- To update model: replace files in AI-Model/runs/detect/.../weights/, run `./deploy/setup_model.sh`, then restart service
 
 ---
 
@@ -198,7 +204,7 @@ Content-Type: application/json
 ## Quick checklist (summary) ✅
 - [ ] Clone repo and create venv
 - [ ] Install apt packages + pip deps
-- [ ] Download model with `deploy/get_model.sh` or copy it to `deploy/models/`
+- [ ] Run `./deploy/setup_model.sh` to copy model to deploy/models/
 - [ ] Create `.env` from `.env.example` and fill values
 - [ ] Test `python deploy/webrtc_server.py ...` manually
 - [ ] Create systemd service and enable it
