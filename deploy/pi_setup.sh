@@ -83,10 +83,13 @@ cat <<'EOF'
 === Next steps ===
 - Models are ready in deploy/models/ (best.pt and/or best.onnx)
 
-- Quick run (camera):
-  python deploy/test_video.py --model deploy/models/best.pt --source 0 --conf 0.25
+- Quick run (camera) - ⚠️ USE ONNX on Raspberry Pi:
+  python deploy/test_video.py --model deploy/models/best.onnx --source 0 --conf 0.25
+  
+- ⚠️ IMPORTANT: Do NOT use best.pt on Raspberry Pi - it will fail with "illegal instruction" error.
+  PyTorch pip wheels are compiled for x86/x64, not ARM. Always use best.onnx with onnxruntime.
 
-- If onnxruntime failed above and you need it, try using conda/mamba or find a prebuilt wheel for your Pi's Python and CPU architecture.
+- If onnxruntime failed above, try: pip install onnxruntime==1.16.3
 
 EOF
 

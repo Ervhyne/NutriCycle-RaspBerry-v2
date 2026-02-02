@@ -3,8 +3,8 @@ ultralytics
 opencv-python
 numpy
 
-# Optional / deployment-only
-# onnxruntime  # required to run .onnx models. If pip install fails on Windows, use conda: `conda install -c conda-forge onnxruntime`
+# ONNX Runtime - REQUIRED for Raspberry Pi (use .onnx model to avoid PyTorch ARM issues)
+onnxruntime  # If pip fails: try `pip install onnxruntime==1.16.3` or conda
 
 # Optional (trackers) - may require build tools on Windows
 # lap  # use `conda install -c conda-forge lap` or a prebuilt wheel if pip fails

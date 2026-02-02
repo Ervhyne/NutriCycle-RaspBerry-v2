@@ -115,6 +115,8 @@ Important entries:
 source venv/bin/activate
 python deploy/webrtc_server.py --model deploy/models/best.onnx --source 0 --machine-id RPI-001 --announce-server https://your-node.example.com/api/announce --mqtt-broker mqtt.example.com
 ```
+**⚠️ Important:** Use `best.onnx` (not `best.pt`) on Raspberry Pi. PyTorch `.pt` models cause "illegal instruction" errors on ARM because pip wheels are compiled for x86/x64 CPU instructions.
+
 - Open `http://localhost:8080` or (from another device) `http://<pi-ip>:8080`
 - If using ngrok, start ngrok and the server will auto-detect the public URL (ngrok exposes local API on port 4040)
 
@@ -135,10 +137,11 @@ WorkingDirectory=/home/pi/nutricycle
 EnvironmentFile=/home/pi/nutricycle/deploy/.env
 ExecStart=/home/pi/nutricycle/venv/bin/python \
   /home/pi/nutricycle/deploy/webrtc_server.py \
-  --model "deploy/models/best.pt" --source 0 --machine-id "$MACHINE_ID" \
+  --model "deploy/models/best.onnx" --source 0 --machine-id "$MACHINE_ID" \
   --announce-server "$ANNOUNCE_SERVER" --announce-interval "$ANNOUNCE_INTERVAL" \
   --mqtt-broker "$MQTT_BROKER" --mqtt-port "$MQTT_PORT" --mqtt-topic "$MQTT_TOPIC" --mqtt-esp-topic "$MQTT_ESP_TOPIC" \
   --control-token "$CONTROL_TOKEN"
+# Note: Use best.onnx on Pi (not best.pt) to avoid PyTorch ARM compatibility issues
 Restart=on-failure
 RestartSec=5
 

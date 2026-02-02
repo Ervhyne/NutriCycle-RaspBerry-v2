@@ -49,21 +49,43 @@ Edit values:
 
 ### 5. Test the camera
 ```bash
-python deploy/test_video.py --model deploy/models/best.pt --source 0 --conf 0.25
+python deploy/test_video.py --model deploy/models/best.onnx --source 0 --conf 0.25
 ```
 
 Press `q` to quit.
 
+**⚠️ Important:** Always use `best.onnx` (not `best.pt`) on Raspberry Pi to avoid "illegal instruction" errors.
+
 ### 6. Start the WebRTC server
+
+**Default (5-10 FPS):**
 ```bash
 python deploy/webrtc_server.py \
-  --model deploy/models/best.pt \
+  --model deploy/models/best.onnx \
   --source 0 \
   --machine-id RPI-001 \
   --conf 0.25 \
   --host 0.0.0.0 \
   --port 8080
 ```
+
+**Optimized for speed (15-25 FPS):**
+```bash
+python deploy/webrtc_server.py \
+  --model deploy/models/best.onnx \
+  --source 0 \
+  --machine-id RPI-001 \
+  --conf 0.25 \
+  --imgsz 416 \
+  --skip-frames 1 \
+  --host 0.0.0.0 \
+  --port 8080
+```
+
+**Performance options:**
+- `--imgsz 416` or `--imgsz 320` — Smaller input size = faster (default 640)
+- `--skip-frames 1` — Process every 2nd frame (skip-frames 2 = every 3rd frame)
+- Lower resolution gives smoother video on Pi 4B
 
 Open `http://<raspberry-pi-ip>:8080` in your browser to see live detection.
 
@@ -138,12 +160,12 @@ sudo journalctl -u nutricycle.service -f
 ## Models
 
 ✅ **Models are included in the repo** at:
-- `AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt` (PyTorch)
-- `AI-Model/runs/detect/nutricycle_foreign_only/weights/best.onnx` (ONNX)
+- `AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt` (PyTorch - **Windows/x64 only**)
+- `AI-Model/runs/detect/nutricycle_foreign_only/weights/best.onnx` (ONNX - **use this on Raspberry Pi**)
 
 The setup script automatically copies them to `deploy/models/` for easy access.
 
-**Recommendation:** Use `best.pt` (PyTorch) for best performance with Ultralytics. ONNX is optional.
+**⚠️ Critical for Raspberry Pi:** Always use `best.onnx` model with onnxruntime. The PyTorch `.pt` model will crash with "illegal instruction" error on ARM processors because pip-installed PyTorch uses x86/x64 CPU instructions that don't exist on ARM.
 
 ---
 
@@ -154,7 +176,13 @@ The setup script automatically copies them to `deploy/models/` for easy access.
 ✅ **Device announcement** — Auto-register with your Node.js server
 ✅ **Remote control** — Accept start/stop commands from your backend
 ✅ **Automatic public URL detection** — Works with ngrok out of the box
-✅ **Foreign object detection** — Trained model included
+✅ **Foreign object detection** — YOLOv8n trained model included
+✅ **Performance optimizations** — Frame skipping and smaller input sizes for smooth FPS on Pi
+
+**Expected frame rates (Pi 4B with YOLOv8n ONNX):**
+- Default (imgsz=640): ~5-10 FPS
+- Optimized (imgsz=416 + skip-frames=1): ~15-25 FPS
+- Aggressive (imgsz=320 + skip-frames=2): ~25-35 FPS
 
 ---
 
@@ -165,13 +193,17 @@ The setup script automatically copies them to `deploy/models/` for easy access.
 - Check camera permissions: `ls -l /dev/video*`
 - Test with: `raspistill -o test.jpg` (Pi Camera) or `v4l2-ctl --list-devices` (USB)
 
+**"Illegal instruction" error?**
+- ⚠️ **You're using PyTorch `.pt` model** - switch to ONNX: `--model deploy/models/best.onnx`
+- This error means PyTorch was compiled for x86/x64 CPUs and won't run on ARM
+
+**ONNX runtime not installed?**
+- Install: `pip install onnxruntime==1.16.3`
+- Or try: `pip install onnxruntime --no-deps && pip install numpy protobuf flatbuffers`
+
 **Dependencies failed?**
 - Make sure you're using Python 3.10 or 3.11: `python3 --version`
 - Try installing system libs: `sudo apt install build-essential libatlas-base-dev`
-
-**ONNX runtime not installed?**
-- Use the PyTorch model instead: `--model deploy/models/best.pt`
-- Or install via conda: `conda install -c conda-forge onnxruntime`
 
 **Server won't start?**
 - Check port 8080 is not in use: `sudo lsof -i :8080`
