@@ -56,11 +56,13 @@ cmake \
     -DNCNN_BUILD_TOOLS=ON \
     -DNCNN_DISABLE_RTTI=OFF \
     -DNCNN_DISABLE_EXCEPTION=OFF \
+    -DCMAKE_INSTALL_PREFIX="$WORK_DIR/ncnn/install" \
     ..
 
 make -j$(nproc)
+make install
 
-echo "✅ NCNN built successfully"
+echo "✅ NCNN built and installed successfully"
 
 # Create inference directory structure
 DEPLOY_DIR="$(dirname "$(dirname "$(realpath "$0")")")/deploy"
@@ -226,7 +228,7 @@ cd build
 
 cmake \
     -DCMAKE_BUILD_TYPE=Release \
-    -Dncnn_DIR="$WORK_DIR/ncnn/build/install/lib/cmake/ncnn" \
+    -Dncnn_DIR="$WORK_DIR/ncnn/install/lib/cmake/ncnn" \
     ..
 
 make -j$(nproc)
