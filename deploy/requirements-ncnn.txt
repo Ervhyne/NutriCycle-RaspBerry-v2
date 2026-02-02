@@ -1,0 +1,17 @@
+# NutriCycle NCNN Requirements (Raspberry Pi)
+# Minimal dependencies - no PyTorch, no ultralytics
+
+# Core dependencies
+opencv-python-headless  # Headless version for Pi (smaller, faster)
+numpy
+
+# WebRTC streaming (optional - for webrtc_server_ncnn.py)
+aiortc
+aiohttp
+av
+
+# MQTT support for detection alerts
+paho-mqtt
+
+# NOTE: NCNN inference is handled by C++ binary (no Python NCNN package needed)
+# The ncnn_wrapper.py calls the compiled binary via subprocess
