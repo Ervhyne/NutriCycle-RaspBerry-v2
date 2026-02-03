@@ -52,22 +52,32 @@ echo "🔨 Building NCNN (10-15 minutes)..."
 mkdir -p build
 cd build
 
+# Use -Wno-error to prevent warnings from stopping the build
 cmake \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized" \
     -DNCNN_VULKAN=OFF \
     -DNCNN_BUILD_EXAMPLES=OFF \
     -DNCNN_BUILD_TOOLS=ON \
     -DNCNN_PYTHON=ON \
     ..
 
-make -j$(nproc)
+echo "Building (this may show warnings, that's normal)..."
+make -j$(nproc) 2>&1 | tee build.log
 
-echo "✅ NCNN built successfully"
+echo ""
+echo "✅ NCNN build completed"
 echo "Verifying onnx2ncnn tool..."
 if [ -f "tools/onnx/onnx2ncnn" ]; then
     echo "✅ onnx2ncnn found at: $(pwd)/tools/onnx/onnx2ncnn"
 else
-    echo "❌ onnx2ncnn not found! Build may have failed."
+    echo "❌ onnx2ncnn not found!"
+    echo "Checking build directory structure..."
+    find . -name "onnx2ncnn" 2>/dev/null || echo "Not found anywhere in build directory"
+    echo ""
+    echo "Check build.log for errors. Common fixes:"
+    echo "1. Clean rebuild: rm -rf ~/ncnn && cd ~/NutriCycle-RaspBerry-v2/deploy && ./setup_ncnn_pi_simple.sh"
+    echo "2. Install missing deps: sudo apt-get install -y libprotobuf-dev protobuf-compiler"
     exit 1
 fi
 
