@@ -43,6 +43,10 @@ fi
 
 cd ncnn
 
+# Initialize and update submodules
+echo "📥 Updating git submodules..."
+git submodule update --init --recursive
+
 # Build NCNN
 echo "🔨 Building NCNN (10-15 minutes)..."
 mkdir -p build
