@@ -61,8 +61,8 @@ class YOLOVideoTrack(VideoStreamTrack):
             sys.exit(1)
         
         # Set 480p resolution (fast performance, lower bandwidth)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 512)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 512)
         
         # Get camera properties (actual values after setting - camera will use closest supported resolution)
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
