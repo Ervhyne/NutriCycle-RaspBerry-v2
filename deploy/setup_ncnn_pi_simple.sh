@@ -27,16 +27,18 @@ sudo apt-get install -y \
     python3-dev
 
 # Create working directory
-WORK_DIR="$HOME/ncnn_build"
-mkdir -p "$WORK_DIR"
+WORK_DIR="$HOME"
 cd "$WORK_DIR"
 
 # Clone NCNN
 echo "📥 Cloning NCNN repository..."
 if [ ! -d "ncnn" ]; then
-    git clone --depth=1 https://github.com/Tencent/ncnn
+    git clone --depth=1 https://github.com/Tencent/ncnn.git
 else
-    echo "NCNN already cloned"
+    echo "ℹ️  NCNN already cloned, pulling latest changes..."
+    cd ncnn
+    git pull
+    cd ..
 fi
 
 cd ncnn
@@ -52,33 +54,46 @@ cmake \
     -DNCNN_BUILD_EXAMPLES=OFF \
     -DNCNN_BUILD_TOOLS=ON \
     -DNCNN_PYTHON=ON \
-    -DCMAKE_INSTALL_PREFIX="$WORK_DIR/ncnn/install" \
     ..
 
 make -j$(nproc)
-make install
 
 echo "✅ NCNN built successfully"
+echo "Verifying onnx2ncnn tool..."
+if [ -f "tools/onnx/onnx2ncnn" ]; then
+    echo "✅ onnx2ncnn found at: $(pwd)/tools/onnx/onnx2ncnn"
+else
+    echo "❌ onnx2ncnn not found! Build may have failed."
+    exit 1
+fi
 
 # Install Python ncnn
 echo "📦 Installing pyncnn (Python bindings)..."
-cd "$WORK_DIR/ncnn/python"
+cd "$HOME/ncnn/python"
 pip3 install --upgrade pip
 pip3 install .
+
+# Verify pyncnn installation
+echo "Verifying pyncnn installation..."
+python3 -c "import ncnn; print('✅ pyncnn installed successfully, version:', ncnn.__version__)" || echo "⚠️  pyncnn installation may have issues"
 
 echo ""
 echo "✅ NCNN Setup Complete!"
 echo "======================================"
-echo "Tools location: $WORK_DIR/ncnn/build/tools"
+echo "Tools location: $HOME/ncnn/build/tools"
 echo ""
 echo "📋 Next steps:"
 echo "1. Convert ONNX → NCNN:"
-echo "   cd $WORK_DIR/ncnn/build"
-echo "   ./tools/onnx/onnx2ncnn ~/best.onnx best.param best.bin"
+echo "   cd ~/ncnn/build/tools/onnx"
+echo "   ./onnx2ncnn ~/NutriCycle-RaspBerry-v2/deploy/models/best.onnx \\"
+echo "              ~/NutriCycle-RaspBerry-v2/deploy/models/best.param \\"
+echo "              ~/NutriCycle-RaspBerry-v2/deploy/models/best.bin"
 echo ""
-echo "2. (Optional) INT8 quantization:"
-echo "   ./tools/quantize/ncnn2int8 best.param best.bin best-int8.param best-int8.bin ~/calibration_images/"
+echo "2. Verify conversion:"
+echo "   ls -lh ~/NutriCycle-RaspBerry-v2/deploy/models/"
 echo ""
-echo "3. Test with Python:"
-echo "   python3 -c 'import ncnn; print(\"pyncnn version:\", ncnn.__version__)'"
+echo "3. Test NCNN model:"
+echo "   cd ~/NutriCycle-RaspBerry-v2/deploy"
+echo "   source venv/bin/activate"
+echo "   python test_video_ncnn.py"
 echo ""

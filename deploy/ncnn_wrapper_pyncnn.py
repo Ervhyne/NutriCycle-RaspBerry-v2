@@ -16,7 +16,7 @@ class NCNNInferencePython:
     Drop-in replacement for ultralytics YOLO.
     """
     
-    def __init__(self, param_path: str, bin_path: str, conf_threshold: float = 0.5, target_size: int = 320):
+    def __init__(self, param_path: str, bin_path: str, conf_threshold: float = 0.5, target_size: int = 512):
         """
         Initialize NCNN inference.
         
@@ -24,7 +24,7 @@ class NCNNInferencePython:
             param_path: Path to .param file
             bin_path: Path to .bin file
             conf_threshold: Confidence threshold
-            target_size: Input size (320, 416, or 640)
+            target_size: Input size (512 for NutriCycle model, or 320/416/640)
         """
         self.param_path = str(Path(param_path).resolve())
         self.bin_path = str(Path(bin_path).resolve())
