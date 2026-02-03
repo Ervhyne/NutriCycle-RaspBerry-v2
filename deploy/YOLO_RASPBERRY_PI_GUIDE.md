@@ -58,7 +58,7 @@ source venv/bin/activate
 ```bash
 pip install ultralytics==8.3.70 torch==2.5.1 torchvision==0.20 ncnn
 ```
-
+so
 **For Pi 5 (latest versions):**
 ```bash
 pip install ultralytics ncnn
@@ -167,7 +167,7 @@ Press **`q`** to stop the script.
 1. **Clone NutriCycle repo**:
    ```bash
    cd ~
-   git clone https://github.com/YOUR_USERNAME/NutriCycle-RaspBerry-v2.git
+   git clone https://github.com/Ervhyne/NutriCycle-RaspBerry-v2.git
    cd NutriCycle-RaspBerry-v2/deploy
    ```
 

@@ -200,14 +200,30 @@ yolo predict model=models/best.onnx source=0 imgsz=512
 
 ## 🐛 Troubleshooting
 
-### Error: "NCNN tools not found"
+### Error: "NCNN tools not found" or "protobuf" errors
 ```bash
-# Check if build completed
-ls -l ~/ncnn/build/tools/onnx/onnx2ncnn
+# First, manually install dependencies
+sudo apt-get update
+sudo apt-get install -y build-essential git cmake libprotobuf-dev protobuf-compiler
 
-# If missing, rebuild
+# Verify protobuf is installed
+protoc --version
+
+# Clean up and rebuild
+rm -rf ~/ncnn
+cd ~/NutriCycle-RaspBerry-v2/deploy
+./setup_ncnn_pi_simple.sh
+```
+
+### Error: Build warnings about uninitialized variables
+```bash
+# Rebuild with warnings disabled
 cd ~/ncnn/build
-cmake .. && make -j4
+cmake -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized" ..
+make -j4
+
+# Verify onnx2ncnn was built
+ls -l tools/onnx/onnx2ncnn
 ```
 
 ### Error: "ONNX model not found"

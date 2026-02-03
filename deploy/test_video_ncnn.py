@@ -11,10 +11,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from ncnn_wrapper import load_ncnn_model
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model", default="ncnn/models/best-int8")
+parser.add_argument("--model", default="models/best.ncnn")
 parser.add_argument("--source", default="1")  # "0" for webcam or "path/to/video.mp4"
 parser.add_argument("--output", default=None)
 parser.add_argument("--conf", type=float, default=0.5)
+parser.add_argument("--imgsz", type=int, default=512, help='Inference image size (must match training size)')
 parser.add_argument("--flip", choices=['none','vertical','horizontal','180'], default='none',
                     help='Flip video: vertical=upside-down, horizontal, 180=rotate 180')
 args = parser.parse_args()
@@ -26,18 +27,22 @@ source = int(args.source) if args.source.isdigit() else args.source
 
 # Resolve model path
 model_path = args.model
-if not Path(model_path).with_suffix('.param').exists():
+
+# Check for .ncnn.param first (pnnx output), then .param (legacy onnx2ncnn)
+param_file = Path(f"{model_path}.param")
+if not param_file.exists():
     # Try with deploy prefix
-    alt = Path("deploy") / model_path
-    if alt.with_suffix('.param').exists():
-        model_path = str(alt)
+    param_file = Path("deploy") / f"{model_path}.param"
+    if param_file.exists():
+        model_path = str(Path("deploy") / model_path)
     else:
         print(f"❌ Model not found: {model_path}.param")
-        print(f"   Looked in: {Path(model_path).resolve()}")
-        print(f"   And: {alt.resolve()}")
+        print(f"   Looked in: {Path(model_path).resolve()}.param")
+        print(f"   And: {param_file.resolve()}")
         sys.exit(1)
 
 print(f"🔥 Loading NCNN model: {model_path}")
+print(f"   Image size: {args.imgsz}x{args.imgsz}")
 model = load_ncnn_model(model_path, conf=args.conf)
 
 print(f"📹 Opening video source: {source}")

@@ -15,6 +15,8 @@ fi
 # Install dependencies
 echo "📦 Installing dependencies..."
 sudo apt-get update
+
+echo "Installing build tools and libraries..."
 sudo apt-get install -y \
     build-essential \
     git \
@@ -25,6 +27,28 @@ sudo apt-get install -y \
     python3-opencv \
     python3-pip \
     python3-dev
+
+# Verify critical dependencies
+echo ""
+echo "Verifying dependencies..."
+if ! command -v protoc &> /dev/null; then
+    echo "❌ protoc not found! Retrying installation..."
+    sudo apt-get install -y --reinstall protobuf-compiler libprotobuf-dev
+fi
+
+if command -v protoc &> /dev/null; then
+    echo "✅ protoc version: $(protoc --version)"
+else
+    echo "❌ protobuf-compiler installation failed"
+    echo "Try manually: sudo apt-get install -y protobuf-compiler libprotobuf-dev"
+    exit 1
+fi
+
+if ! command -v cmake &> /dev/null; then
+    echo "❌ cmake not found!"
+    exit 1
+fi
+echo "✅ cmake version: $(cmake --version | head -n1)"
 
 # Create working directory
 WORK_DIR="$HOME"

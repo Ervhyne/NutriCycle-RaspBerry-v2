@@ -6,6 +6,7 @@ parser.add_argument("--model", default="runs/detect/nutricycle_foreign_only/weig
 parser.add_argument("--source", default="1")  # "0" for webcam or "path/to/video.mp4"
 parser.add_argument("--output", default=None)
 parser.add_argument("--conf", type=float, default=0.5)
+parser.add_argument("--imgsz", type=int, default=512, help='Inference image size')
 parser.add_argument("--flip", choices=['none','vertical','horizontal','180'], default='none',
                     help='Flip video: vertical=upside-down, horizontal, 180=rotate 180')
 args = parser.parse_args()
@@ -39,7 +40,9 @@ if model_path.lower().endswith('.onnx'):
             print("onnxruntime not installed. Install it with: python -m pip install onnxruntime\nor use a .pt model instead.")
             sys.exit(1)
 
-model = YOLO(model_path)
+print(f"Loading model: {model_path}")
+print(f"Using image size: {args.imgsz}x{args.imgsz}")
+model = YOLO(model_path, task='detect')
 cap = cv2.VideoCapture(source)
 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -64,7 +67,7 @@ while True:
             frame = cv2.flip(frame, -1)
 
     t0 = time.time()
-    results = model(frame, conf=args.conf)
+    results = model(frame, conf=args.conf, imgsz=args.imgsz)
     annotated = results[0].plot()
     fps = 1.0 / max(1e-6, (time.time() - t0))
     cv2.putText(annotated, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
