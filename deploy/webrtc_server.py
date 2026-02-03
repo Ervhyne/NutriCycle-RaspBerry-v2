@@ -30,50 +30,96 @@ logger = logging.getLogger(__name__)
 # Global args
 args = None
 model = None
+shared_camera = None  # Singleton camera instance
 
 # Event queue for detection events
 from asyncio import Queue
 event_queue: Queue = Queue(maxsize=32)  # non-blocking if full
 
 
-class YOLOVideoTrack(VideoStreamTrack):
-    """Video track that captures from camera and applies YOLO inference."""
+class SharedCamera:
+    """Singleton camera instance shared across all video tracks."""
+    _instance = None
+    _lock = asyncio.Lock()
     
-    def __init__(self, source, flip_mode, model_instance, conf_threshold, event_queue=None):
-        self.event_queue = event_queue
-        if self.event_queue is None:
-            self.event_queue = event_queue  # still None, but safe
-
-        super().__init__()
+    def __init__(self, source):
         self.source = source
-        self.flip_mode = flip_mode
-        self.model = model_instance
-        self.conf = conf_threshold
-        
-        # Open camera with DirectShow on Windows for better USB camera support
+        # Open camera with DirectShow on Windows, V4L2 on Linux for better USB camera support
         if isinstance(source, int):
-            self.cap = cv2.VideoCapture(source, cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY)
+            backend = cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_V4L2
+            self.cap = cv2.VideoCapture(source, backend)
         else:
             self.cap = cv2.VideoCapture(source)
         
         if not self.cap.isOpened():
             logger.error(f"Failed to open camera/video source: {source}")
-            sys.exit(1)
+            raise RuntimeError(f"Cannot open camera: {source}")
         
-        # Set 480p resolution (fast performance, lower bandwidth)
+        # Set 512x512 resolution for faster processing
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 512)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 512)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
         
-        # Get camera properties (actual values after setting - camera will use closest supported resolution)
+        # Get actual camera properties
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         
-        logger.info(f"Camera opened: {self.width}x{self.height} @ {self.fps}fps")
+        logger.info(f"✅ Shared camera opened: {self.width}x{self.height} @ {self.fps}fps")
+        self.ref_count = 0
+    
+    @classmethod
+    async def get_instance(cls, source):
+        """Get or create the singleton camera instance."""
+        async with cls._lock:
+            if cls._instance is None:
+                cls._instance = SharedCamera(source)
+            cls._instance.ref_count += 1
+            logger.info(f"Camera reference count: {cls._instance.ref_count}")
+            return cls._instance
+    
+    @classmethod
+    async def release_instance(cls):
+        """Decrease reference count and release if no more users."""
+        async with cls._lock:
+            if cls._instance:
+                cls._instance.ref_count -= 1
+                logger.info(f"Camera reference count: {cls._instance.ref_count}")
+                if cls._instance.ref_count <= 0:
+                    cls._instance.cap.release()
+                    logger.info("📹 Shared camera released")
+                    cls._instance = None
+    
+    def read(self):
+        """Thread-safe camera read."""
+        return self.cap.read()
+
+
+class YOLOVideoTrack(VideoStreamTrack):
+    """Video track that captures from shared camera and applies YOLO inference."""
+    
+    def __init__(self, camera, flip_mode, model_instance, conf_threshold, event_queue=None):
+        super().__init__()
+        self.camera = camera
+        self.flip_mode = flip_mode
+        self.model = model_instance
+        self.conf = conf_threshold
+        self.event_queue = event_queue
+        
+        self.width = camera.width
+        self.height = camera.height
+        self.fps = camera.fps
         
         self.frame_count = 0
         self.last_fps_time = time.time()
         self.fps_counter = 0
+        
+        logger.info(f"🎬 Video track created for client")
+    
+    async def stop(self):
+        """Release camera reference when track stops."""
+        await super().stop()
+        await SharedCamera.release_instance()
         
     async def recv(self):
         """Receive the next frame (with YOLO inference applied)."""
@@ -82,7 +128,7 @@ class YOLOVideoTrack(VideoStreamTrack):
             
             # Run blocking I/O in executor to avoid blocking event loop
             loop = asyncio.get_event_loop()
-            ret, frame = await loop.run_in_executor(None, self.cap.read)
+            ret, frame = await loop.run_in_executor(None, self.camera.read)
             
             if not ret:
                 logger.warning("Failed to read frame from camera")
@@ -172,10 +218,6 @@ class YOLOVideoTrack(VideoStreamTrack):
         except Exception as e:
             logger.error(f"Error in recv(): {e}", exc_info=True)
             raise
-    
-    def __del__(self):
-        if hasattr(self, 'cap'):
-            self.cap.release()
 
 
 # Track active peer connections
@@ -213,12 +255,20 @@ async def offer(request):
             await pc.close()
             pcs.discard(pc)
     
-    # Create video track
+    # Get shared camera instance
+    try:
+        camera = await SharedCamera.get_instance(args.source)
+    except RuntimeError as e:
+        logger.error(f"Failed to get camera: {e}")
+        return web.Response(status=503, text="Camera unavailable")
+    
+    # Create video track with shared camera
     video_track = YOLOVideoTrack(
-        source=args.source,
+        camera=camera,
         flip_mode=args.flip,
         model_instance=model,
-        conf_threshold=args.conf
+        conf_threshold=args.conf,
+        event_queue=event_queue
     )
     
     pc.addTrack(video_track)
@@ -383,6 +433,31 @@ def main():
     logger.info(f"Loading model: {model_path}")
     model = YOLO(model_path)
     logger.info(f"Model loaded. Classes: {model.names}")
+    
+    # Test camera access before starting server
+    logger.info(f"Testing camera access: {args.source}")
+    try:
+        test_backend = cv2.CAP_V4L2 if os.name != 'nt' else cv2.CAP_DSHOW
+        test_cap = cv2.VideoCapture(args.source if isinstance(args.source, int) else args.source, 
+                                     test_backend if isinstance(args.source, int) else cv2.CAP_ANY)
+        if not test_cap.isOpened():
+            logger.error(f"❌ Cannot access camera: {args.source}")
+            logger.error("Troubleshooting tips:")
+            logger.error("  1. Check camera is connected: ls -la /dev/video*")
+            logger.error("  2. Add user to video group: sudo usermod -a -G video $USER")
+            logger.error("  3. Install v4l-utils: sudo apt-get install v4l-utils")
+            logger.error("  4. Check devices: v4l2-ctl --list-devices")
+            logger.error("  5. Try different camera index: --source 1 or --source 2")
+            sys.exit(1)
+        ret, test_frame = test_cap.read()
+        if not ret:
+            logger.error(f"❌ Camera opened but cannot read frames: {args.source}")
+            sys.exit(1)
+        test_cap.release()
+        logger.info(f"✅ Camera test successful: {test_frame.shape}")
+    except Exception as e:
+        logger.error(f"❌ Camera test failed: {e}")
+        sys.exit(1)
     
     # Setup web app
     app = web.Application()

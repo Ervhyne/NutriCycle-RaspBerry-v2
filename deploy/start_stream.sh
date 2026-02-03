@@ -8,6 +8,23 @@ echo "🚀 Starting NutriCycle WebRTC Stream..."
 # Kill any existing processes
 pkill -f webrtc_server.py || true
 pkill -f ngrok || true
+sleep 1
+
+# Check if user is in video group
+if ! groups | grep -q video; then
+    echo "⚠️  Warning: User not in 'video' group!"
+    echo "   Run: sudo usermod -a -G video \$USER"
+    echo "   Then logout and login again"
+    echo ""
+fi
+
+# Check camera access
+echo "📹 Checking camera access..."
+if ! ls /dev/video* 1> /dev/null 2>&1; then
+    echo "❌ No camera found! Connect your camera and try again."
+    exit 1
+fi
+echo "✅ Camera devices found: $(ls /dev/video* | tr '\n' ' ')"
 
 # Activate venv
 if [ -d ~/yolo/venv ]; then
