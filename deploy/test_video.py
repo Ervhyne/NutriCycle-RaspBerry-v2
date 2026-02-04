@@ -6,7 +6,7 @@ parser.add_argument("--model", default="runs/detect/nutricycle_foreign_only/weig
 parser.add_argument("--source", default="1")  # "0" for webcam or "path/to/video.mp4"
 parser.add_argument("--output", default=None)
 parser.add_argument("--conf", type=float, default=0.5)
-parser.add_argument("--imgsz", type=int, default=512, help='Inference image size')
+parser.add_argument("--imgsz", type=int, default=320, help='Inference image size')
 parser.add_argument("--flip", choices=['none','vertical','horizontal','180'], default='none',
                     help='Flip video: vertical=upside-down, horizontal, 180=rotate 180')
 args = parser.parse_args()

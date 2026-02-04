@@ -55,9 +55,10 @@ class SharedCamera:
             logger.error(f"Failed to open camera/video source: {source}")
             raise RuntimeError(f"Cannot open camera: {source}")
         
-        # Set 512x512 resolution for faster processing
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 512)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 512)
+        # Set capture resolution per --imgsz for faster processing on ONNX/CPU
+        desired_size = getattr(args, 'imgsz', 320)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, desired_size)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, desired_size)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
         
         # Get actual camera properties
@@ -98,13 +99,14 @@ class SharedCamera:
 class YOLOVideoTrack(VideoStreamTrack):
     """Video track that captures from shared camera and applies YOLO inference."""
     
-    def __init__(self, camera, flip_mode, model_instance, conf_threshold, event_queue=None):
+    def __init__(self, camera, flip_mode, model_instance, conf_threshold, event_queue=None, imgsz=320):
         super().__init__()
         self.camera = camera
         self.flip_mode = flip_mode
         self.model = model_instance
         self.conf = conf_threshold
         self.event_queue = event_queue
+        self.imgsz = imgsz
         
         self.width = camera.width
         self.height = camera.height
@@ -146,7 +148,7 @@ class YOLOVideoTrack(VideoStreamTrack):
             
             # Run YOLO inference
             t0 = time.time()
-            results = self.model(frame, conf=self.conf, verbose=False)
+            results = self.model(frame, conf=self.conf, imgsz=self.imgsz, verbose=False)
             annotated = results[0].plot()
             inference_time = time.time() - t0
 
@@ -268,7 +270,8 @@ async def offer(request):
         flip_mode=args.flip,
         model_instance=model,
         conf_threshold=args.conf,
-        event_queue=event_queue
+        event_queue=event_queue,
+        imgsz=args.imgsz
     )
     
     pc.addTrack(video_track)
@@ -384,6 +387,7 @@ def main():
     parser.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
     parser.add_argument("--flip", choices=['none', 'vertical', 'horizontal', '180'], default='none',
                         help="Flip video: vertical=upside-down, horizontal, 180=rotate 180")
+    parser.add_argument("--imgsz", type=int, default=320, help="Inference image size (pixels)")
     parser.add_argument("--host", default="0.0.0.0", help="Server host")
     parser.add_argument("--port", type=int, default=8080, help="Server port")
     parser.add_argument("--announce-server", default=None, help="HTTP endpoint to POST machine_id + video URL")
