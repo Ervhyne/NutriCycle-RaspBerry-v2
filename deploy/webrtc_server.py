@@ -379,7 +379,79 @@ def main():
 
     # will register these tasks later on app startup
 
-    
+
+    async def camera_keepalive(app):
+        """Continuously read camera frames and run YOLO inference even with no clients.
+        This keeps the SharedCamera instance alive and publishes detection events to the
+        existing event_queue so other systems (MQTT, logs) keep receiving detections.
+        """
+        try:
+            camera = await SharedCamera.get_instance(args.source)
+        except RuntimeError as e:
+            logger.error(f"Keepalive failed to open camera: {e}")
+            return
+
+        logger.info("🔁 Camera keepalive started (persistent mode)")
+        try:
+            # run at a lower FPS than live streaming to reduce CPU; configurable via --keepalive-fps
+            interval = 1.0 / max(1, getattr(args, 'keepalive_fps', 2))
+            while True:
+                loop = asyncio.get_event_loop()
+                ret, frame = await loop.run_in_executor(None, camera.read)
+                if not ret:
+                    await asyncio.sleep(0.1)
+                    continue
+
+                try:
+                    t0 = time.time()
+                    results = model(frame, conf=args.conf, imgsz=args.imgsz, verbose=False)
+                    inference_time = time.time() - t0
+
+                    dets = []
+                    for b in results[0].boxes:
+                        try:
+                            xyxy = b.xyxy.tolist() if hasattr(b, 'xyxy') else None
+                            dets.append({
+                                'cls': int(b.cls),
+                                'name': model.names[int(b.cls)] if hasattr(model, 'names') else str(int(b.cls)),
+                                'conf': float(b.conf),
+                                'xyxy': xyxy,
+                            })
+                        except Exception:
+                            continue
+
+                    if dets:
+                        event = {
+                            'timestamp': time.time(),
+                            'frame_id': None,
+                            'width': camera.width,
+                            'height': camera.height,
+                            'detections': dets,
+                            'machine_id': getattr(args, 'machine_id', None)
+                        }
+                        try:
+                            event_queue.put_nowait(event)
+                        except Exception:
+                            # drop if queue full
+                            pass
+
+                    # throttle keepalive loop to configured FPS
+                    await asyncio.sleep(interval)
+
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.warning(f"Keepalive inference error: {e}")
+                    await asyncio.sleep(1.0)
+        finally:
+            # Ensure the camera reference is released when the keepalive task stops
+            try:
+                await SharedCamera.release_instance()
+            except Exception:
+                pass
+            logger.info("🔁 Camera keepalive stopped")
+
+
     parser = argparse.ArgumentParser(description="WebRTC YOLO streaming server")
     parser.add_argument("--model", default="AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt",
                         help="Path to YOLO model (.pt or .onnx)")
@@ -394,6 +466,8 @@ def main():
     parser.add_argument("--machine-id", default=None, help="Unique Machine ID for this device")
     parser.add_argument("--announce-interval", type=int, default=60, help="Seconds between announce attempts")
     parser.add_argument("--public-url", default=None, help="Public video URL if ngrok is used externally")
+    parser.add_argument("--persistent", action="store_true", help="Keep camera + inference running even when no clients are connected")
+    parser.add_argument("--keepalive-fps", type=int, default=2, help="FPS to run background inference when persistent (default: 2)")
     
     # MQTT options
     parser.add_argument("--mqtt-broker", default=None, help="MQTT broker host (optional)")
@@ -508,7 +582,7 @@ def main():
         if cmd not in ('start', 'stop', 'pause', 'reset'):
             return web.Response(status=400, text='Invalid command')
 
-        # Publish to ESP32 via MQTT
+        # Publish to ESP32 via MQTT (best-effort)
         mqtt_client = request.app.get('mqtt_client')
         esp_topic = getattr(args, 'mqtt_esp_topic', 'nutricycle/esp32')
         payload = {'machine_id': machine_id, 'command': cmd, 'timestamp': time.time()}
@@ -517,23 +591,97 @@ def main():
             try:
                 mqtt_client.publish(esp_topic, json.dumps(payload), qos=1)
                 logger.info(f"Forwarded control '{cmd}' to ESP32 via MQTT on topic {esp_topic}")
-                return web.Response(status=200, text='Command forwarded')
             except Exception as e:
-                logger.error(f"MQTT publish failed: {e}")
-                return web.Response(status=500, text='MQTT publish failed')
+                logger.warning(f"MQTT publish failed: {e}")
+
         else:
-            logger.warning('MQTT client not connected')
-            return web.Response(status=503, text='MQTT client not connected')
+            logger.warning('MQTT client not connected (control will still be applied locally)')
+
+        # Local control actions: start/stop/pause/reset affect server-side keepalive (camera + inference)
+        try:
+            if cmd == 'start':
+                if not request.app.get('camera_keepalive_task'):
+                    request.app['camera_keepalive_task'] = asyncio.create_task(camera_keepalive(request.app))
+                    logger.info('Local keepalive started via /control')
+                    return web.Response(status=200, text='Keepalive started')
+                else:
+                    return web.Response(status=200, text='Keepalive already running')
+
+            elif cmd == 'stop':
+                t = request.app.get('camera_keepalive_task')
+                if t:
+                    t.cancel()
+                    try:
+                        await t
+                    except Exception:
+                        pass
+                    request.app.pop('camera_keepalive_task', None)
+                # Ensure camera released
+                await SharedCamera.release_instance()
+                logger.info('Local keepalive stopped and camera released via /control')
+                return web.Response(status=200, text='Keepalive stopped and camera released')
+
+            elif cmd == 'pause':
+                # stop keepalive but keep camera open for quicker resume
+                t = request.app.get('camera_keepalive_task')
+                if t:
+                    t.cancel()
+                    try:
+                        await t
+                    except Exception:
+                        pass
+                    request.app.pop('camera_keepalive_task', None)
+                try:
+                    await SharedCamera.get_instance(args.source)
+                except RuntimeError as e:
+                    return web.Response(status=503, text=f'Failed to open camera: {e}')
+                logger.info('Local paused: camera open, inference stopped')
+                return web.Response(status=200, text='Paused (camera open, inference stopped)')
+
+            elif cmd == 'reset':
+                # restart keepalive
+                t = request.app.get('camera_keepalive_task')
+                if t:
+                    t.cancel()
+                    try:
+                        await t
+                    except Exception:
+                        pass
+                    request.app.pop('camera_keepalive_task', None)
+                request.app['camera_keepalive_task'] = asyncio.create_task(camera_keepalive(request.app))
+                logger.info('Local keepalive restarted via /control')
+                return web.Response(status=200, text='Keepalive restarted')
+
+        except Exception as e:
+            logger.error(f'Error handling control {cmd}: {e}', exc_info=True)
+            return web.Response(status=500, text=f'Control handling failed: {e}')
 
     app.router.add_post('/control', control_handler)
+
+    async def status_handler(request):
+        """Return JSON status about camera, keepalive, and connections."""
+        camera_running = SharedCamera._instance is not None
+        ref_count = SharedCamera._instance.ref_count if SharedCamera._instance else 0
+        keepalive_running = bool(request.app.get('camera_keepalive_task'))
+        peers = len(pcs)
+        return web.json_response({
+            'camera_running': camera_running,
+            'camera_ref_count': ref_count,
+            'keepalive_running': keepalive_running,
+            'peer_connections': peers
+        })
+
+    app.router.add_get('/status', status_handler)
 
     async def _start_background_tasks(app):
         app['announce_task'] = asyncio.create_task(announce_task(app))
         app['event_broadcaster_task'] = asyncio.create_task(event_broadcaster(app))
+        if getattr(args, 'persistent', False):
+            app['camera_keepalive_task'] = asyncio.create_task(camera_keepalive(app))
 
     async def _cleanup_background_tasks(app):
         # Cancel background tasks
-        for name in ('announce_task', 'event_broadcaster_task'):
+        for name in ('announce_task', 'event_broadcaster_task', 'camera_keepalive_task'):
             t = app.get(name)
             if t:
                 t.cancel()
@@ -541,6 +689,13 @@ def main():
                     await t
                 except Exception:
                     pass
+        # Ensure camera released if persistent task was not running or left a reference
+        try:
+            # Attempt a graceful release in case refs linger
+            await SharedCamera.release_instance()
+        except Exception:
+            pass
+
         # Stop mqtt client loop if present
         mqtt_client = app.get('mqtt_client')
         if mqtt_client:
