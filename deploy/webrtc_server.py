@@ -36,6 +36,10 @@ shared_camera = None  # Singleton camera instance
 from asyncio import Queue
 event_queue: Queue = Queue(maxsize=32)  # non-blocking if full
 
+# In-memory latest annotated frame (JPEG bytes) for instant preview
+latest_frame_jpeg = None
+latest_frame_lock = asyncio.Lock()
+
 
 class SharedCamera:
     """Singleton camera instance shared across all video tracks."""
@@ -151,6 +155,15 @@ class YOLOVideoTrack(VideoStreamTrack):
             results = self.model(frame, conf=self.conf, imgsz=self.imgsz, verbose=False)
             annotated = results[0].plot()
             inference_time = time.time() - t0
+
+            # Update latest annotated frame for instant preview (non-blocking)
+            try:
+                ret, buf = cv2.imencode('.jpg', annotated)
+                if ret:
+                    async with latest_frame_lock:
+                        globals()['latest_frame_jpeg'] = buf.tobytes()
+            except Exception:
+                pass
 
             # Build detection list
             dets = []
@@ -406,6 +419,17 @@ def main():
                     t0 = time.time()
                     results = model(frame, conf=args.conf, imgsz=args.imgsz, verbose=False)
                     inference_time = time.time() - t0
+
+                    annotated = results[0].plot()
+
+                    # Update latest annotated frame for instant preview
+                    try:
+                        ret, buf = cv2.imencode('.jpg', annotated)
+                        if ret:
+                            async with latest_frame_lock:
+                                globals()['latest_frame_jpeg'] = buf.tobytes()
+                    except Exception:
+                        pass
 
                     dets = []
                     for b in results[0].boxes:
@@ -672,6 +696,17 @@ def main():
         })
 
     app.router.add_get('/status', status_handler)
+
+    async def last_frame_handler(request):
+        """Return the latest annotated frame as JPEG for quick previews."""
+        async with latest_frame_lock:
+            data = globals().get('latest_frame_jpeg')
+        if not data:
+            return web.Response(status=404, text='No frame available')
+        headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
+        return web.Response(body=data, content_type='image/jpeg', headers=headers)
+
+    app.router.add_get('/last_frame.jpg', last_frame_handler)
 
     async def _start_background_tasks(app):
         app['announce_task'] = asyncio.create_task(announce_task(app))

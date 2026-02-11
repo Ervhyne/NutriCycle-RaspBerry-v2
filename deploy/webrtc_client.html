@@ -24,31 +24,77 @@
   </style>
 </head>
 <body>
-  <!-- Pure video view (no text, no buttons, no extra UI) -->
-  <video id="videoElement" autoplay playsinline muted></video>
+  <!-- Fullscreen preview image shown while WebRTC connects -->
+  <img id="preview" alt="preview" style="position:fixed;inset:0;width:100vw;height:100vh;object-fit:cover;z-index:5;display:block;background:#000" />
+  <video id="videoElement" autoplay playsinline muted style="position:fixed;inset:0;z-index:1"></video>
   <div id="tapOverlay" aria-hidden="true"></div>
 
   <script>
-    // Minimal WebRTC receive-only client (keeps the existing offer/answer flow)
+    // Minimal WebRTC receive-only client + preview image + auto-reconnect on visibility
     const video = document.getElementById('videoElement');
+    const preview = document.getElementById('preview');
     const overlay = document.getElementById('tapOverlay');
     let pc = null;
+    let previewInterval = null;
+
+    async function fetchPreview() {
+      try {
+        const resp = await fetch('/last_frame.jpg?ts=' + Date.now());
+        if (!resp.ok) return;
+        const blob = await resp.blob();
+        preview.src = URL.createObjectURL(blob);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    async function startPreviewLoop() {
+      await fetchPreview();
+      if (previewInterval) clearInterval(previewInterval);
+      previewInterval = setInterval(fetchPreview, 2000); // refresh every 2s while waiting
+    }
+
+    function stopPreviewLoop() {
+      if (previewInterval) {
+        clearInterval(previewInterval);
+        previewInterval = null;
+      }
+    }
 
     async function startConnection() {
       try {
+        if (pc && (pc.connectionState === 'connected' || pc.connectionState === 'connecting')) return;
+        if (pc) {
+          pc.close();
+          pc = null;
+        }
+
         pc = new RTCPeerConnection({
           iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
 
         pc.addEventListener('track', (evt) => {
           if (evt.track.kind === 'video') {
-            video.srcObject = evt.streams[0];
+            stopPreviewLoop();
+            const stream = evt.streams[0];
+            video.srcObject = stream;
             // try to play; if blocked, overlay lets user tap to resume
-            video.play().catch(() => {});
+            video.play().then(() => {
+              // hide preview as soon as video plays
+              preview.style.display = 'none';
+            }).catch(() => {});
           }
         });
 
-        pc.addEventListener('connectionstatechange', () => console.log('Connection state:', pc.connectionState));
+        pc.addEventListener('connectionstatechange', () => {
+          console.log('Connection state:', pc.connectionState);
+          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+            // fall back to preview and attempt reconnect
+            preview.style.display = 'block';
+            startPreviewLoop();
+            setTimeout(() => startConnection(), 1000);
+          }
+        });
         pc.addEventListener('iceconnectionstatechange', () => console.log('ICE state:', pc.iceConnectionState));
 
         pc.addTransceiver('video', { direction: 'recvonly' });
@@ -67,14 +113,31 @@
         await pc.setRemoteDescription(answer);
       } catch (err) {
         console.error('WebRTC start failed', err);
+        // keep preview running and retry
+        preview.style.display = 'block';
+        startPreviewLoop();
+        setTimeout(() => startConnection(), 1500);
       }
     }
+
+    // Auto-resume on visibility (reconnect when app/tab returns)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        // try to connect if not connected
+        startConnection();
+      } else {
+        // keep the pc open but do not aggressively reconnect while hidden
+        // optionally you could close pc here to save resources
+      }
+    });
 
     // Tap overlay to resume playback when autoplay is blocked (no visible UI text)
     overlay.addEventListener('click', () => { video.play().catch(() => {}); });
 
     window.addEventListener('beforeunload', () => { if (pc) pc.close(); });
 
+    // Start preview and connection
+    startPreviewLoop();
     startConnection();
   </script>
 </body>
