@@ -359,8 +359,27 @@ def main():
         mqtt_broker = getattr(args, 'mqtt_broker', None)
         mqtt_topic = getattr(args, 'mqtt_topic', 'nutricycle/detections')
         mqtt_esp_topic = getattr(args, 'mqtt_esp_topic', 'nutricycle/esp32')
+        mqtt_control_topic = getattr(args, 'mqtt_control_topic', 'nutricycle/esp32/control')
         mqtt_port = getattr(args, 'mqtt_port', 1883)
         mqtt_qos = getattr(args, 'mqtt_qos', 1)
+        server_url = getattr(args, 'server_url', 'http://localhost:4000')
+        machine_id = getattr(args, 'machine_id', None)
+
+        # Callback for handling incoming MQTT control commands from ESP32
+        def on_esp32_control(client, userdata, message):
+            """Handle start/stop commands from ESP32 via MQTT."""
+            try:
+                payload = json.loads(message.payload.decode())
+                command = payload.get('command')
+                logger.info(f"Received ESP32 command via MQTT: {command}")
+
+                if command in ('start', 'stop'):
+                    # Post to server to trigger batch creation/completion
+                    asyncio.create_task(post_control_to_server(command, machine_id, server_url))
+                else:
+                    logger.warning(f"Unknown command from ESP32: {command}")
+            except Exception as e:
+                logger.error(f"Error processing ESP32 control message: {e}", exc_info=True)
 
         if mqtt_broker:
             try:
@@ -368,7 +387,16 @@ def main():
                 mqtt_client = paho.Client()
                 if getattr(args, 'mqtt_username', None):
                     mqtt_client.username_pw_set(getattr(args, 'mqtt_username'), getattr(args, 'mqtt_password', None))
+
+                # Set callback for incoming control messages
+                mqtt_client.on_message = on_esp32_control
+
                 mqtt_client.connect(mqtt_broker, port=mqtt_port)
+
+                # Subscribe to ESP32 control topic
+                mqtt_client.subscribe(mqtt_control_topic, qos=mqtt_qos)
+                logger.info(f"Subscribed to MQTT topic: {mqtt_control_topic}")
+
                 mqtt_client.loop_start()
                 app['mqtt_client'] = mqtt_client  # store on app for control handler
                 logger.info(f"Connected to MQTT broker: {mqtt_broker}")
@@ -476,6 +504,32 @@ def main():
             logger.info("🔁 Camera keepalive stopped")
 
 
+    async def post_control_to_server(command: str, machine_id: str, server_url: str):
+        """POST start/stop command to server to trigger batch creation/completion."""
+        if not machine_id:
+            logger.warning("Cannot post to server: machine_id not configured")
+            return
+
+        endpoint = f"{server_url}/machines/{machine_id}/control"
+        payload = {"action": command}
+
+        try:
+            async with ClientSession() as session:
+                async with session.post(endpoint, json=payload, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        batch_number = data.get('batchNumber')
+                        if batch_number:
+                            logger.info(f"✅ Batch {batch_number} created on server for machine {machine_id}")
+                        else:
+                            logger.info(f"✅ {command.capitalize()} command sent to server successfully")
+                    else:
+                        text = await response.text()
+                        logger.error(f"Server returned error {response.status}: {text}")
+        except Exception as e:
+            logger.error(f"Failed to post {command} to server: {e}", exc_info=True)
+
+
     parser = argparse.ArgumentParser(description="WebRTC YOLO streaming server")
     parser.add_argument("--model", default="AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt",
                         help="Path to YOLO model (.pt or .onnx)")
@@ -498,10 +552,12 @@ def main():
     parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port")
     parser.add_argument("--mqtt-topic", default="nutricycle/detections", help="MQTT topic for detection events")
     parser.add_argument("--mqtt-esp-topic", default="nutricycle/esp32", help="MQTT topic to send compact alerts to ESP32")
+    parser.add_argument("--mqtt-control-topic", default="nutricycle/esp32/control", help="MQTT topic to receive start/stop commands from ESP32")
     parser.add_argument("--mqtt-username", default=None, help="MQTT username")
     parser.add_argument("--mqtt-password", default=None, help="MQTT password")
     parser.add_argument("--mqtt-qos", type=int, default=1, help="MQTT QoS")
     parser.add_argument("--control-token", default=None, help="Bearer token required for /control HTTP POSTs")
+    parser.add_argument("--server-url", default="http://localhost:4000", help="URL of NutriCycle server for batch creation")
 
     args = parser.parse_args()
     
