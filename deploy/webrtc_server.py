@@ -365,6 +365,9 @@ def main():
         server_url = getattr(args, 'server_url', 'http://localhost:4000')
         machine_id = getattr(args, 'machine_id', None)
 
+        # Get reference to the running event loop so MQTT thread can schedule async tasks
+        loop = asyncio.get_event_loop()
+
         # Callback for handling incoming MQTT control commands from ESP32
         def on_esp32_control(client, userdata, message):
             """Handle start/stop commands from ESP32 via MQTT."""
@@ -374,8 +377,10 @@ def main():
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
                 if command in ('start', 'stop'):
-                    # Post to server to trigger batch creation/completion
-                    asyncio.create_task(post_control_to_server(command, machine_id, server_url))
+                    # Schedule coroutine on the asyncio event loop from MQTT thread
+                    asyncio.run_coroutine_threadsafe(
+                        post_control_to_server(command, machine_id, server_url), loop
+                    )
                 else:
                     logger.warning(f"Unknown command from ESP32: {command}")
             except Exception as e:
