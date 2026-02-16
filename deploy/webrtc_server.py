@@ -822,6 +822,24 @@ def main():
                     await t
                 except Exception:
                     pass
+        
+        # Send "offline" status to API on shutdown
+        api_base_url = getattr(args, 'api_base_url', None)
+        machine_secret = getattr(args, 'machine_secret', None)
+        machine_id = getattr(args, 'machine_id', None)
+        if api_base_url and machine_id and machine_secret:
+            try:
+                async with ClientSession() as session:
+                    status_endpoint = f"{api_base_url}/machines/{machine_id}/device/status"
+                    await session.post(status_endpoint, json={
+                        'secret': machine_secret,
+                        'status': 'offline',
+                        'meta': {'timestamp': time.time(), 'reason': 'shutdown'}
+                    }, timeout=5)
+                    logger.info(f"✅ Machine status updated to 'offline' on shutdown")
+            except Exception as e:
+                logger.warning(f"Failed to send offline status: {e}")
+        
         # Ensure camera released if persistent task was not running or left a reference
         try:
             # Attempt a graceful release in case refs linger
