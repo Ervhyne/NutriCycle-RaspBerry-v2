@@ -316,11 +316,19 @@ def main():
     mqtt_client = None
 
     async def announce_task(app):
-        """Announce machine_id and public URL to central node server periodically."""
+        """Announce machine_id and public URL to central node server periodically, and update status to online."""
         announce_server = getattr(args, 'announce_server', None)
         interval = getattr(args, 'announce_interval', 60)
         machine_id = getattr(args, 'machine_id', None)
         public_url = getattr(args, 'public_url', None)
+        
+        # Status update configuration
+        api_base_url = getattr(args, 'api_base_url', None)
+        machine_secret = getattr(args, 'machine_secret', None)
+        status_update_interval = getattr(args, 'status_update_interval', 60)
+        
+        # Track if we've sent initial status
+        status_sent = False
 
         async with ClientSession() as session:
             while True:
@@ -349,6 +357,31 @@ def main():
                             logger.info(f"Announced to server: {announce_server}")
                         except Exception as e:
                             logger.warning(f"Failed to announce: {e}")
+                    
+                    # Send status update to NutriCycle API
+                    if api_base_url and machine_id and machine_secret:
+                        status_endpoint = f"{api_base_url}/api/machines/{machine_id}/device/status"
+                        status_payload = {
+                            'secret': machine_secret,
+                            'status': 'online',
+                            'meta': {
+                                'video_url': public_url,
+                                'timestamp': time.time()
+                            }
+                        }
+                        try:
+                            await session.post(status_endpoint, json=status_payload, timeout=5)
+                            if not status_sent:
+                                logger.info(f"✅ Machine status updated to 'online': {status_endpoint}")
+                                status_sent = True
+                            else:
+                                logger.debug(f"Machine status heartbeat sent")
+                        except Exception as e:
+                            logger.warning(f"Failed to update machine status: {e}")
+                    elif machine_id and not (api_base_url and machine_secret) and not status_sent:
+                        logger.warning(f"⚠️  No API configuration for status updates. Set API_BASE_URL and MACHINE_SECRET to enable status updates.")
+                        status_sent = True  # Only warn once
+                        
                 except Exception as e:
                     logger.error(f"Error in announce_task: {e}")
                 await asyncio.sleep(interval)
@@ -515,19 +548,20 @@ def main():
             logger.warning("Cannot post to server: machine_id not configured")
             return
 
-        endpoint = f"{server_url}/machines/{machine_id}/control"
+        endpoint = f"{server_url}/machines/device/control"
         payload = {"action": command}
+        headers = {"x-machine-id": machine_id}
 
         try:
             async with ClientSession() as session:
-                async with session.post(endpoint, json=payload, timeout=10) as response:
+                async with session.post(endpoint, json=payload, headers=headers, timeout=10) as response:
                     if response.status == 200:
                         data = await response.json()
                         batch_number = data.get('batchNumber')
                         if batch_number:
-                            logger.info(f"✅ Batch {batch_number} created on server for machine {machine_id}")
+                            logger.info(f"Batch {batch_number} created on server for machine {machine_id}")
                         else:
-                            logger.info(f"✅ {command.capitalize()} command sent to server successfully")
+                            logger.info(f"{command.capitalize()} command sent to server successfully")
                     else:
                         text = await response.text()
                         logger.error(f"Server returned error {response.status}: {text}")
@@ -549,6 +583,9 @@ def main():
     parser.add_argument("--machine-id", default=None, help="Unique Machine ID for this device")
     parser.add_argument("--announce-interval", type=int, default=60, help="Seconds between announce attempts")
     parser.add_argument("--public-url", default=None, help="Public video URL if ngrok is used externally")
+    parser.add_argument("--api-base-url", default=None, help="NutriCycle API base URL (e.g. https://api.example.com) for status updates")
+    parser.add_argument("--machine-secret", default=None, help="Machine secret for authentication with NutriCycle API")
+    parser.add_argument("--status-update-interval", type=int, default=60, help="Seconds between machine status updates to API")
     parser.add_argument("--persistent", action="store_true", help="Keep camera + inference running even when no clients are connected")
     parser.add_argument("--keepalive-fps", type=int, default=2, help="FPS to run background inference when persistent (default: 2)")
     
