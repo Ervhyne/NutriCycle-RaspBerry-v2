@@ -410,23 +410,41 @@ def main():
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
                 if command in ('start', 'stop', 'sorting', 'grinding', 'dehydration', 'feed_completed'):
+                    batch_number = payload.get('batchNumber')
                     if command == 'sorting':
-                        logger.info("Sorting command received from ESP32. You can add custom logic here (e.g., open camera, notify server, etc.)")
-                        # TODO: Implement sorting action as needed
-                    elif command == 'grinding':
-                        logger.info("Grinding command received from ESP32. You can add custom logic here (e.g., trigger grinding stage, notify server, etc.)")
-                        # TODO: Implement grinding action as needed
-                    elif command == 'dehydration':
-                        logger.info("Dehydration command received from ESP32. You can add custom logic here (e.g., trigger dehydration stage, notify server, etc.)")
-                        # TODO: Implement dehydration action as needed
-                    elif command == 'feed_completed':
-                        logger.info("Feed Completed command received from ESP32. You can add custom logic here (e.g., mark feed as completed, notify server, etc.)")
-                        # TODO: Implement feed completed action as needed
+                        logger.info(f"Sorting command received from ESP32 for batch {batch_number}. Sending POST to server.")
+                        if batch_number:
+                            asyncio.run_coroutine_threadsafe(
+                                post_stage_to_server('POST', command, batch_number, server_url), loop
+                            )
+                        else:
+                            logger.warning("No batchNumber provided in ESP32 message for sorting.")
+                    elif command in ('grinding', 'dehydration', 'feed_completed'):
+                        logger.info(f"{command.capitalize()} command received from ESP32 for batch {batch_number}. Sending PATCH to server.")
+                        if batch_number:
+                            asyncio.run_coroutine_threadsafe(
+                                post_stage_to_server('PATCH', command, batch_number, server_url), loop
+                            )
+                        else:
+                            logger.warning(f"No batchNumber provided in ESP32 message for {command}.")
                     else:
                         # Schedule coroutine on the asyncio event loop from MQTT thread
                         asyncio.run_coroutine_threadsafe(
                             post_control_to_server(command, machine_id, server_url), loop
                         )
+                    async def post_stage_to_server(method: str, stage: str, batch_number: str, server_url: str):
+                        endpoint = f"{server_url}/batches/{batch_number}/process"
+                        payload = {"feedStatus": stage}
+                        try:
+                            async with ClientSession() as session:
+                                if method == 'POST':
+                                    async with session.post(endpoint, json=payload, timeout=10) as response:
+                                        logger.info(f"Server POST {endpoint} status: {response.status}")
+                                elif method == 'PATCH':
+                                    async with session.patch(endpoint, json=payload, timeout=10) as response:
+                                        logger.info(f"Server PATCH {endpoint} status: {response.status}")
+                        except Exception as e:
+                            logger.error(f"Failed to post stage to server: {e}", exc_info=True)
                 else:
                     logger.warning(f"Unknown command from ESP32: {command}")
             except Exception as e:
