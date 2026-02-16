@@ -401,9 +401,10 @@ def main():
         # Get reference to the running event loop so MQTT thread can schedule async tasks
         loop = asyncio.get_event_loop()
 
+
         # Callback for handling incoming MQTT control commands from ESP32
         def on_esp32_control(client, userdata, message):
-            """Handle start/stop commands from ESP32 via MQTT."""
+            """Handle start/stop and process stage commands from ESP32 via MQTT."""
             try:
                 payload = json.loads(message.payload.decode())
                 command = payload.get('command')
@@ -414,7 +415,6 @@ def main():
                     if command == 'sorting':
                         logger.info(f"Sorting command received from ESP32 for batch {batch_number}. Sending POST to server.")
                         if batch_number:
-                            # Step 1: POST to /batches/{batchNumber}/process to create BatchProcess
                             asyncio.run_coroutine_threadsafe(
                                 post_stage_to_server('POST', command, batch_number, server_url), loop
                             )
@@ -423,44 +423,45 @@ def main():
                     elif command in ('grinding', 'dehydration', 'feed_completed'):
                         logger.info(f"{command.capitalize()} command received from ESP32 for batch {batch_number}. Sending PATCH to server.")
                         if batch_number:
-                            # Step 2: PATCH to /batches/{batchNumber}/process to update BatchProcess stage
                             asyncio.run_coroutine_threadsafe(
                                 post_stage_to_server('PATCH', command, batch_number, server_url), loop
                             )
                         else:
                             logger.warning(f"No batchNumber provided in ESP32 message for {command}.")
                     else:
-                        # Schedule coroutine on the asyncio event loop from MQTT thread
+                        # For 'start' and 'stop', post to server control endpoint
                         asyncio.run_coroutine_threadsafe(
                             post_control_to_server(command, machine_id, server_url), loop
                         )
-                    async def post_stage_to_server(method: str, stage: str, batch_number: str, server_url: str):
-                        """
-                        POST: Create a new BatchProcess for the batch (used for 'sorting' stage)
-                        PATCH: Update the existing BatchProcess for the batch (used for 'grinding', 'dehydration', 'feed_completed')
-                        """
-                        endpoint = f"{server_url}/batches/{batch_number}/process"
-                        payload = {"feedStatus": stage}
-                        try:
-                            async with ClientSession() as session:
-                                if method == 'POST':
-                                    async with session.post(endpoint, json=payload, timeout=10) as response:
-                                        logger.info(f"Server POST {endpoint} status: {response.status}")
-                                        if response.status >= 400:
-                                            text = await response.text()
-                                            logger.error(f"Server error response: {text}")
-                                elif method == 'PATCH':
-                                    async with session.patch(endpoint, json=payload, timeout=10) as response:
-                                        logger.info(f"Server PATCH {endpoint} status: {response.status}")
-                                        if response.status >= 400:
-                                            text = await response.text()
-                                            logger.error(f"Server error response: {text}")
-                        except Exception as e:
-                            logger.error(f"Failed to post stage to server: {e}", exc_info=True)
                 else:
                     logger.warning(f"Unknown command from ESP32: {command}")
             except Exception as e:
                 logger.error(f"Error processing ESP32 control message: {e}", exc_info=True)
+
+        async def post_stage_to_server(method: str, stage: str, batch_number: str, server_url: str):
+            """
+            POST: Create a new BatchProcess for the batch (used for 'sorting' stage)
+            PATCH: Update the existing BatchProcess for the batch (used for 'grinding', 'dehydration', 'feed_completed')
+            """
+            endpoint = f"{server_url}/batches/{batch_number}/process"
+            payload = {"feedStatus": stage}
+            try:
+                async with ClientSession() as session:
+                    if method == 'POST':
+                        async with session.post(endpoint, json=payload, timeout=10) as response:
+                            logger.info(f"Server POST {endpoint} status: {response.status}")
+                            if response.status >= 400:
+                                text = await response.text()
+                                logger.error(f"Server error response: {text}")
+                    elif method == 'PATCH':
+                        async with session.patch(endpoint, json=payload, timeout=10) as response:
+                            logger.info(f"Server PATCH {endpoint} status: {response.status}")
+                            if response.status >= 400:
+                                text = await response.text()
+                                logger.error(f"Server error response: {text}")
+            except Exception as e:
+                logger.error(f"Failed to post stage to server: {e}", exc_info=True)
+
 
         if mqtt_broker:
             try:
