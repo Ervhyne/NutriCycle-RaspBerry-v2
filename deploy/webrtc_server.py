@@ -409,11 +409,24 @@ def main():
                 command = payload.get('command')
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
-                if command in ('start', 'stop'):
-                    # Schedule coroutine on the asyncio event loop from MQTT thread
-                    asyncio.run_coroutine_threadsafe(
-                        post_control_to_server(command, machine_id, server_url), loop
-                    )
+                if command in ('start', 'stop', 'sorting', 'grinding', 'dehydration', 'feed_completed'):
+                    if command == 'sorting':
+                        logger.info("Sorting command received from ESP32. You can add custom logic here (e.g., open camera, notify server, etc.)")
+                        # TODO: Implement sorting action as needed
+                    elif command == 'grinding':
+                        logger.info("Grinding command received from ESP32. You can add custom logic here (e.g., trigger grinding stage, notify server, etc.)")
+                        # TODO: Implement grinding action as needed
+                    elif command == 'dehydration':
+                        logger.info("Dehydration command received from ESP32. You can add custom logic here (e.g., trigger dehydration stage, notify server, etc.)")
+                        # TODO: Implement dehydration action as needed
+                    elif command == 'feed_completed':
+                        logger.info("Feed Completed command received from ESP32. You can add custom logic here (e.g., mark feed as completed, notify server, etc.)")
+                        # TODO: Implement feed completed action as needed
+                    else:
+                        # Schedule coroutine on the asyncio event loop from MQTT thread
+                        asyncio.run_coroutine_threadsafe(
+                            post_control_to_server(command, machine_id, server_url), loop
+                        )
                 else:
                     logger.warning(f"Unknown command from ESP32: {command}")
             except Exception as e:
