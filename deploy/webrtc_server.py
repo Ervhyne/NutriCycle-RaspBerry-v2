@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+print("=== SCRIPT EXECUTION STARTED ===")
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+from aiohttp import web, ClientSession
+from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
+from aiortc.contrib.media import MediaBlackhole
+from av import VideoFrame
+from ultralytics import YOLO
+
+print("=== IMPORTS SUCCESSFUL ===")
 """
 WebRTC server for NutriCycle live detection streaming.
 Streams camera + YOLO inference to browser clients via WebRTC.
@@ -311,6 +331,7 @@ async def on_shutdown(app):
 
 def main():
     global args, model
+    print("=== MAIN FUNCTION STARTED ===")
 
     # MQTT client (optional)
 mqtt_client = None
