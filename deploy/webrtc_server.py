@@ -461,10 +461,8 @@ async def resume_or_create_latest_batch(server_url: str, machine_id: str):
                             return
                         # Otherwise, mark as in progress and start new
                         batch_states[batch_number] = {'in_progress': True, 'finished': False, 'status': 'active'}
-                        # Also call backend logic for batch_number
-                        asyncio.run_coroutine_threadsafe(
-                            resume_or_create_batch(batch_number, server_url), loop
-                        )
+                        # No resume_or_create_batch function defined; skip this call to avoid NameError
+                        logger.warning("resume_or_create_batch is not implemented. Skipping batch resume for batch_number: %s", batch_number)
                     else:
                         # No batch number: always resume or create latest batch for this machine
                         logger.info("No batchNumber provided in ESP32 message for start. Will resume or create latest batch.")
