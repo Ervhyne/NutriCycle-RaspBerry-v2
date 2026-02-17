@@ -744,10 +744,13 @@ async def resume_or_create_latest_batch(server_url: str, machine_id: str):
     parser.add_argument("--server-url", default="http://localhost:4000", help="URL of NutriCycle server for batch creation")
 
     args = parser.parse_args()
-    
+    # Ensure no leading zeros in integer arguments (fix SyntaxError)
+    if isinstance(args.port, str):
+        args.port = int(args.port.lstrip('0') or '0')
+    if isinstance(args.mqtt_port, str):
+        args.mqtt_port = int(args.mqtt_port.lstrip('0') or '0')
     # Parse source
-    args.source = int(args.source) if args.source.isdigit() else args.source
-    
+    args.source = int(args.source) if isinstance(args.source, str) and args.source.isdigit() else args.source
     # Resolve model path
     model_path = args.model
     if not os.path.exists(model_path):
