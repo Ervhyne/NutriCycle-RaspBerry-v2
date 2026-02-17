@@ -315,7 +315,7 @@ def main():
     # MQTT client (optional)
 mqtt_client = None
 
-    async def announce_task(app):
+async def announce_task(app):
         """Announce machine_id and public URL to central node server periodically, and update status to online."""
         announce_server = getattr(args, 'announce_server', None)
         interval = getattr(args, 'announce_interval', 60)
