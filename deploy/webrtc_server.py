@@ -313,7 +313,7 @@ def main():
     global args, model
 
     # MQTT client (optional)
-    mqtt_client = None
+mqtt_client = None
 
     async def announce_task(app):
         """Announce machine_id and public URL to central node server periodically, and update status to online."""
@@ -417,7 +417,7 @@ async def resume_or_create_latest_batch(server_url: str, machine_id: str):
 
     async def event_broadcaster(app):
         """Consume detection events and publish via MQTT (if configured) and optionally log."""
-        nonlocal mqtt_client
+        global mqtt_client
         mqtt_broker = getattr(args, 'mqtt_broker', None)
         mqtt_topic = getattr(args, 'mqtt_topic', 'nutricycle/detections')
         mqtt_esp_topic = getattr(args, 'mqtt_esp_topic', 'nutricycle/esp32')
