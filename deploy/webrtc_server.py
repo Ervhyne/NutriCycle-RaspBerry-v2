@@ -467,14 +467,41 @@ def main():
                         else:
                             logger.warning(f"No batchNumber provided in ESP32 message for {command}.")
                     elif command == 'start':
-                        # For 'start', set batch status to running
+                        # For 'start', resume idle batch if exists, else create new batch
                         if batch_number:
-                            logger.info(f"Start command received for batch {batch_number}. Setting status to 'running' via PATCH.")
+                            logger.info(f"Start command received for batch {batch_number}. Checking batch status.")
+                            # Check batch status
                             asyncio.run_coroutine_threadsafe(
-                                patch_batch_status(batch_number, 'running', server_url), loop
+                                resume_or_create_batch(batch_number, server_url), loop
                             )
                         else:
                             logger.warning("No batchNumber provided in ESP32 message for start.")
+                            async def resume_or_create_batch(batch_number: str, server_url: str):
+                                endpoint = f"{server_url}/batches/{batch_number}"
+                                try:
+                                    async with ClientSession() as session:
+                                        # Get batch info
+                                        async with session.get(endpoint, timeout=10) as response:
+                                            if response.status == 200:
+                                                batch = await response.json()
+                                                if batch.get('status') == 'idle':
+                                                    # Resume idle batch
+                                                    logger.info(f"Resuming idle batch {batch_number}.")
+                                                    async with session.patch(endpoint, json={"status": "running"}, timeout=10) as patch_resp:
+                                                        logger.info(f"PATCH {endpoint} status: {patch_resp.status}")
+                                                elif batch.get('status') == 'completed':
+                                                    # Create new batch
+                                                    logger.info(f"Batch {batch_number} completed. Creating new batch.")
+                                                    create_endpoint = f"{server_url}/batches"
+                                                    async with session.post(create_endpoint, json={"batchId": batch_number}, timeout=10) as post_resp:
+                                                        logger.info(f"POST {create_endpoint} status: {post_resp.status}")
+                                                else:
+                                                    # Already running or queued
+                                                    logger.info(f"Batch {batch_number} already running or queued.")
+                                            else:
+                                                logger.warning(f"Failed to get batch info for {batch_number}: {response.status}")
+                                except Exception as e:
+                                    logger.error(f"Failed to resume or create batch: {e}", exc_info=True)
                     elif command == 'stop':
                         # For 'stop', set batch status to idle
                         if batch_number:
