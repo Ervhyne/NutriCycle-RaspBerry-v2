@@ -953,6 +953,11 @@ async def resume_or_create_latest_batch(server_url: str, machine_id: str):
         app['event_broadcaster_task'] = asyncio.create_task(event_broadcaster(app))
         if getattr(args, 'persistent', False):
             app['camera_keepalive_task'] = asyncio.create_task(camera_keepalive(app))
+        # Automatically start or resume batch on server startup
+        server_url = getattr(args, 'server_url', 'http://localhost:4000')
+        machine_id = getattr(args, 'machine_id', None)
+        if machine_id:
+            asyncio.create_task(resume_or_create_latest_batch(server_url, machine_id))
 
     async def _cleanup_background_tasks(app):
         # Cancel background tasks
