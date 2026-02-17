@@ -410,8 +410,42 @@ def main():
                 command = payload.get('command')
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
+                # --- CONTINUE UNFINISHED ACTIVITY LOGIC ---
+                batch_number = payload.get('batchNumber')
+                if not hasattr(on_esp32_control, 'batch_states'):
+                    on_esp32_control.batch_states = {}
+                batch_states = on_esp32_control.batch_states
+
+                if command == 'start' and batch_number:
+                    state = batch_states.get(batch_number, {})
+                    if state.get('status') == 'active' and not state.get('finished'):
+                        logger.info(f"Continuing unfinished activity for batch {batch_number} (already running)")
+                        # Already running, skip re-initialization
+                        return
+                    elif state.get('status') == 'idle' and not state.get('finished'):
+                        logger.info(f"Resuming idle batch {batch_number}, continuing process")
+                        batch_states[batch_number]['status'] = 'active'
+                        batch_states[batch_number]['in_progress'] = True
+                        # Continue process (do not re-initialize)
+                        return
+                    # Otherwise, mark as in progress and start new
+                    batch_states[batch_number] = {'in_progress': True, 'finished': False, 'status': 'active'}
+                elif command == 'stop' and batch_number:
+                    # Mark as idle (not finished, can be resumed)
+                    if batch_number in batch_states:
+                        batch_states[batch_number]['status'] = 'idle'
+                        batch_states[batch_number]['in_progress'] = False
+                        # Do not mark as finished, so it can be resumed
+                elif command in ('feed_completed', 'reset') and batch_number:
+                    # Mark as finished
+                    if batch_number in batch_states:
+                        batch_states[batch_number]['finished'] = True
+                        batch_states[batch_number]['in_progress'] = False
+                        batch_states[batch_number]['status'] = 'finished'
+
+                # --- ORIGINAL LOGIC ---
                 if command in ('start', 'stop', 'sorting', 'grinding', 'dehydration', 'feed_completed'):
-                    batch_number = payload.get('batchNumber')
+                    # batch_number already set above
                     if command == 'sorting':
                         logger.info(f"Sorting command received from ESP32 for batch {batch_number}. Sending POST to server.")
                         if batch_number:
