@@ -466,11 +466,38 @@ def main():
                             )
                         else:
                             logger.warning(f"No batchNumber provided in ESP32 message for {command}.")
-                    else:
-                        # For 'start' and 'stop', post to server control endpoint
-                        asyncio.run_coroutine_threadsafe(
-                            post_control_to_server(command, machine_id, server_url), loop
-                        )
+                    elif command == 'start':
+                        # For 'start', set batch status to running
+                        if batch_number:
+                            logger.info(f"Start command received for batch {batch_number}. Setting status to 'running' via PATCH.")
+                            asyncio.run_coroutine_threadsafe(
+                                patch_batch_status(batch_number, 'running', server_url), loop
+                            )
+                        else:
+                            logger.warning("No batchNumber provided in ESP32 message for start.")
+                    elif command == 'stop':
+                        # For 'stop', set batch status to idle
+                        if batch_number:
+                            logger.info(f"Stop command received for batch {batch_number}. Setting status to 'idle' via PATCH.")
+                            asyncio.run_coroutine_threadsafe(
+                                patch_batch_status(batch_number, 'idle', server_url), loop
+                            )
+                        else:
+                            logger.warning("No batchNumber provided in ESP32 message for stop.")
+
+                        # PATCH /batches/:batchNumber with {"status": ...}
+                    async def patch_batch_status(batch_number: str, status: str, server_url: str):
+                        endpoint = f"{server_url}/batches/{batch_number}"
+                        payload = {"status": status}
+                        try:
+                            async with ClientSession() as session:
+                                async with session.patch(endpoint, json=payload, timeout=10) as response:
+                                    logger.info(f"Server PATCH {endpoint} status: {response.status}")
+                                    if response.status >= 400:
+                                        text = await response.text()
+                                        logger.error(f"Server error response: {text}")
+                        except Exception as e:
+                            logger.error(f"Failed to patch batch status: {e}", exc_info=True)
                 else:
                     logger.warning(f"Unknown command from ESP32: {command}")
             except Exception as e:
