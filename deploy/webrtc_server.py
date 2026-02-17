@@ -386,34 +386,34 @@ def main():
                     logger.error(f"Error in announce_task: {e}")
                 await asyncio.sleep(interval)
 
-    # Resume or create latest batch (must be top-level)
-    async def resume_or_create_latest_batch(server_url: str, machine_id: str):
-        """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
-        try:
-            async with ClientSession() as session:
-                # Get latest batch for this machine
-                url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
-                async with session.get(url, timeout=10) as resp:
-                    if resp.status == 200:
-                        batches = await resp.json()
-                        if batches and batches[0]['status'] != 'completed':
-                            # Resume this batch (set to running)
-                            batch = batches[0]
-                            patch_url = f"{server_url}/batches/{batch['batchNumber']}"
-                            patch_data = {"status": "running"}
-                            async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
-                                if patch_resp.status == 200:
-                                    logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
-                                    return
-                    # If all batches are completed or none exist, create new
-                    post_url = f"{server_url}/batches"
-                    post_data = {"machineId": machine_id}
-                    async with session.post(post_url, json=post_data, timeout=10) as post_resp:
-                        if post_resp.status == 201:
-                            new_batch = await post_resp.json()
-                            logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
-        except Exception as e:
-            logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
+    # Resume or create latest batch (must be global scope)
+async def resume_or_create_latest_batch(server_url: str, machine_id: str):
+    """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
+    try:
+        async with ClientSession() as session:
+            # Get latest batch for this machine
+            url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    batches = await resp.json()
+                    if batches and batches[0]['status'] != 'completed':
+                        # Resume this batch (set to running)
+                        batch = batches[0]
+                        patch_url = f"{server_url}/batches/{batch['batchNumber']}"
+                        patch_data = {"status": "running"}
+                        async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                            if patch_resp.status == 200:
+                                logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
+                                return
+                # If all batches are completed or none exist, create new
+                post_url = f"{server_url}/batches"
+                post_data = {"machineId": machine_id}
+                async with session.post(post_url, json=post_data, timeout=10) as post_resp:
+                    if post_resp.status == 201:
+                        new_batch = await post_resp.json()
+                        logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+    except Exception as e:
+        logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
 
     async def event_broadcaster(app):
         """Consume detection events and publish via MQTT (if configured) and optionally log."""
