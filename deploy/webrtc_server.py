@@ -417,21 +417,32 @@ def main():
                     on_esp32_control.batch_states = {}
                 batch_states = on_esp32_control.batch_states
 
-                if command == 'start' and batch_number:
-                    machine_status = 'active'
-                    state = batch_states.get(batch_number, {})
-                    if state.get('status') == 'active' and not state.get('finished'):
-                        logger.info(f"Continuing unfinished activity for batch {batch_number} (already running)")
-                        # Already running, skip re-initialization
-                        return
-                    elif state.get('status') == 'idle' and not state.get('finished'):
-                        logger.info(f"Resuming idle batch {batch_number}, continuing process")
-                        batch_states[batch_number]['status'] = 'active'
-                        batch_states[batch_number]['in_progress'] = True
-                        # Continue process (do not re-initialize)
-                        return
-                    # Otherwise, mark as in progress and start new
-                    batch_states[batch_number] = {'in_progress': True, 'finished': False, 'status': 'active'}
+                if command == 'start':
+                    if batch_number:
+                        machine_status = 'active'
+                        state = batch_states.get(batch_number, {})
+                        if state.get('status') == 'active' and not state.get('finished'):
+                            logger.info(f"Continuing unfinished activity for batch {batch_number} (already running)")
+                            # Already running, skip re-initialization
+                            return
+                        elif state.get('status') == 'idle' and not state.get('finished'):
+                            logger.info(f"Resuming idle batch {batch_number}, continuing process")
+                            batch_states[batch_number]['status'] = 'active'
+                            batch_states[batch_number]['in_progress'] = True
+                            # Continue process (do not re-initialize)
+                            return
+                        # Otherwise, mark as in progress and start new
+                        batch_states[batch_number] = {'in_progress': True, 'finished': False, 'status': 'active'}
+                        # Also call backend logic for batch_number
+                        asyncio.run_coroutine_threadsafe(
+                            resume_or_create_batch(batch_number, server_url), loop
+                        )
+                    else:
+                        # No batch number: always resume or create latest batch for this machine
+                        logger.info("No batchNumber provided in ESP32 message for start. Will resume or create latest batch.")
+                        asyncio.run_coroutine_threadsafe(
+                            resume_or_create_latest_batch(server_url, machine_id), loop
+                        )
                 elif command == 'stop' and batch_number:
                     # Mark batch as idle (not finished, can be resumed)
                     if batch_number in batch_states:
@@ -467,42 +478,37 @@ def main():
                         else:
                             logger.warning(f"No batchNumber provided in ESP32 message for {command}.")
                     elif command == 'start':
-                        # For 'start', resume idle batch if exists, else create new batch
-                        if batch_number:
-                            logger.info(f"Start command received for batch {batch_number}. Checking batch status.")
-                            # Check batch status
-                            asyncio.run_coroutine_threadsafe(
-                                resume_or_create_batch(batch_number, server_url), loop
-                            )
-                        else:
-                            logger.warning("No batchNumber provided in ESP32 message for start.")
-                            async def resume_or_create_batch(batch_number: str, server_url: str):
-                                endpoint = f"{server_url}/batches/{batch_number}"
-                                try:
-                                    async with ClientSession() as session:
-                                        # Get batch info
-                                        async with session.get(endpoint, timeout=10) as response:
-                                            if response.status == 200:
-                                                batch = await response.json()
-                                                if batch.get('status') == 'idle':
-                                                    # Resume idle batch
-                                                    logger.info(f"Resuming idle batch {batch_number}.")
-                                                    async with session.patch(endpoint, json={"status": "running"}, timeout=10) as patch_resp:
-                                                        logger.info(f"PATCH {endpoint} status: {patch_resp.status}")
-                                                elif batch.get('status') == 'completed':
-                                                    # Create new batch
-                                                    logger.info(f"Batch {batch_number} completed. Creating new batch.")
-                                                    create_endpoint = f"{server_url}/batches"
-                                                    async with session.post(create_endpoint, json={"batchId": batch_number}, timeout=10) as post_resp:
-                                                        logger.info(f"POST {create_endpoint} status: {post_resp.status}")
-                                                else:
-                                                    # Already running or queued
-                                                    logger.info(f"Batch {batch_number} already running or queued.")
-                                            else:
-                                                logger.warning(f"Failed to get batch info for {batch_number}: {response.status}")
-                                except Exception as e:
-                                    logger.error(f"Failed to resume or create batch: {e}", exc_info=True)
+                        # Already handled above
+                        pass
                     elif command == 'stop':
+                        # Move resume_or_create_latest_batch to top-level (outside on_esp32_control)
+                        async def resume_or_create_latest_batch(server_url: str, machine_id: str):
+                            """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
+                            try:
+                                async with ClientSession() as session:
+                                    # Get latest batch for this machine
+                                    url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+                                    async with session.get(url, timeout=10) as resp:
+                                        if resp.status == 200:
+                                            batches = await resp.json()
+                                            if batches and batches[0]['status'] != 'completed':
+                                                # Resume this batch (set to running)
+                                                batch = batches[0]
+                                                patch_url = f"{server_url}/batches/{batch['batchNumber']}"
+                                                patch_data = {"status": "running"}
+                                                async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                                                    if patch_resp.status == 200:
+                                                        logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
+                                                        return
+                                        # If all batches are completed or none exist, create new
+                                        post_url = f"{server_url}/batches"
+                                        post_data = {"machineId": machine_id}
+                                        async with session.post(post_url, json=post_data, timeout=10) as post_resp:
+                                            if post_resp.status == 201:
+                                                new_batch = await post_resp.json()
+                                                logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+                            except Exception as e:
+                                logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
                         # For 'stop', set batch status to idle
                         if batch_number:
                             logger.info(f"Stop command received for batch {batch_number}. Setting status to 'idle' via PATCH.")
