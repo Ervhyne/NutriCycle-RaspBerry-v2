@@ -404,6 +404,10 @@ def main():
 
         # Callback for handling incoming MQTT control commands from ESP32
         def on_esp32_control(client, userdata, message):
+            # Global machine status
+            global machine_status
+            if 'machine_status' not in globals():
+                machine_status = 'idle'
             """Handle start/stop and process stage commands from ESP32 via MQTT."""
             try:
                 payload = json.loads(message.payload.decode())
@@ -417,6 +421,7 @@ def main():
                 batch_states = on_esp32_control.batch_states
 
                 if command == 'start' and batch_number:
+                    machine_status = 'active'
                     state = batch_states.get(batch_number, {})
                     if state.get('status') == 'active' and not state.get('finished'):
                         logger.info(f"Continuing unfinished activity for batch {batch_number} (already running)")
@@ -431,13 +436,14 @@ def main():
                     # Otherwise, mark as in progress and start new
                     batch_states[batch_number] = {'in_progress': True, 'finished': False, 'status': 'active'}
                 elif command == 'stop' and batch_number:
-                    # Mark as idle (not finished, can be resumed)
+                    # Mark batch as idle (not finished, can be resumed)
                     if batch_number in batch_states:
                         batch_states[batch_number]['status'] = 'idle'
                         batch_states[batch_number]['in_progress'] = False
                         # Do not mark as finished, so it can be resumed
                 elif command in ('feed_completed', 'reset') and batch_number:
                     # Mark as finished
+                    machine_status = 'finished'
                     if batch_number in batch_states:
                         batch_states[batch_number]['finished'] = True
                         batch_states[batch_number]['in_progress'] = False
