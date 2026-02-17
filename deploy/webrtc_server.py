@@ -404,10 +404,8 @@ def main():
 
         # Callback for handling incoming MQTT control commands from ESP32
         def on_esp32_control(client, userdata, message):
-            # Global machine status
+            # Global machine status (do not set to 'idle' here)
             global machine_status
-            if 'machine_status' not in globals():
-                machine_status = 'idle'
             """Handle start/stop and process stage commands from ESP32 via MQTT."""
             try:
                 payload = json.loads(message.payload.decode())
@@ -440,6 +438,7 @@ def main():
                     if batch_number in batch_states:
                         batch_states[batch_number]['status'] = 'idle'
                         batch_states[batch_number]['in_progress'] = False
+                        batch_states[batch_number]['finished'] = False
                         # Do not mark as finished, so it can be resumed
                 elif command in ('feed_completed', 'reset') and batch_number:
                     # Mark as finished
