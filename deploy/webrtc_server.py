@@ -404,8 +404,7 @@ def main():
 
         # Callback for handling incoming MQTT control commands from ESP32
         def on_esp32_control(client, userdata, message):
-            # Global machine status (do not set to 'idle' here)
-            global machine_status
+            # No machine_status changes here; only batch_states are updated
             """Handle start/stop and process stage commands from ESP32 via MQTT."""
             try:
                 payload = json.loads(message.payload.decode())
