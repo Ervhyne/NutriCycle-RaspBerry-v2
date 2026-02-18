@@ -315,7 +315,9 @@ async def on_shutdown(app):
         if machine_id:
             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
             async with ClientSession() as session:
+                logger.info(f"[Shutdown] Fetching latest batch for machine_id={machine_id} ...")
                 async with session.get(url) as resp:
+                    logger.info(f"[Shutdown] GET {url} status: {resp.status}")
                     if resp.status == 200:
                         batches = await resp.json()
                         if batches and isinstance(batches, list):
@@ -324,21 +326,23 @@ async def on_shutdown(app):
                             if batch_num and batch.get('status') != 'completed':
                                 patch_url = f"{server_url}/batches/{batch_num}"
                                 patch_data = {"status": "idle"}
+                                logger.info(f"[Shutdown] Patching batch {batch_num} to 'idle' ...")
                                 async with session.patch(patch_url, json=patch_data) as patch_resp:
+                                    logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
                                     if patch_resp.status == 200:
-                                        logger.info(f"Set latest batch {batch_num} to 'idle' on shutdown.")
+                                        logger.info(f"[Shutdown] Set latest batch {batch_num} to 'idle' on shutdown.")
                                     else:
-                                        logger.warning(f"Failed to set batch {batch_num} to idle: status {patch_resp.status}")
+                                        logger.warning(f"[Shutdown] Failed to set batch {batch_num} to idle: status {patch_resp.status}")
                             else:
-                                logger.info("No active batch to set idle on shutdown.")
+                                logger.info("[Shutdown] No active batch to set idle on shutdown.")
                         else:
-                            logger.info("No batch found to set idle on shutdown.")
+                            logger.info("[Shutdown] No batch found to set idle on shutdown.")
                     else:
-                        logger.warning(f"Failed to fetch latest batch for idle on shutdown: status {resp.status}")
+                        logger.warning(f"[Shutdown] Failed to fetch latest batch for idle on shutdown: status {resp.status}")
         else:
-            logger.info("No machine_id configured, skipping batch idle on shutdown.")
+            logger.info("[Shutdown] No machine_id configured, skipping batch idle on shutdown.")
     except Exception as e:
-        logger.error(f"Failed to set latest batch to idle on shutdown: {e}", exc_info=True)
+        logger.error(f"[Shutdown] Failed to set latest batch to idle on shutdown: {e}", exc_info=True)
 
 
 def main():
