@@ -1,24 +1,4 @@
 #!/usr/bin/env python3
-print("=== SCRIPT EXECUTION STARTED ===")
-
-import argparse
-import asyncio
-import json
-import logging
-import os
-import sys
-import time
-from pathlib import Path
-
-import cv2
-import numpy as np
-from aiohttp import web, ClientSession
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
-from aiortc.contrib.media import MediaBlackhole
-from av import VideoFrame
-from ultralytics import YOLO
-
-print("=== IMPORTS SUCCESSFUL ===")
 """
 WebRTC server for NutriCycle live detection streaming.
 Streams camera + YOLO inference to browser clients via WebRTC.
@@ -331,12 +311,11 @@ async def on_shutdown(app):
 
 def main():
     global args, model
-    print("=== MAIN FUNCTION STARTED ===")
 
     # MQTT client (optional)
-mqtt_client = None
+    mqtt_client = None
 
-async def announce_task(app):
+    async def announce_task(app):
         """Announce machine_id and public URL to central node server periodically, and update status to online."""
         announce_server = getattr(args, 'announce_server', None)
         interval = getattr(args, 'announce_interval', 60)
@@ -407,38 +386,9 @@ async def announce_task(app):
                     logger.error(f"Error in announce_task: {e}")
                 await asyncio.sleep(interval)
 
-    # Resume or create latest batch (must be global scope)
-async def resume_or_create_latest_batch(server_url: str, machine_id: str):
-    """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
-    try:
-        async with ClientSession() as session:
-            # Get latest batch for this machine
-            url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    batches = await resp.json()
-                    if batches and batches[0]['status'] != 'completed':
-                        # Resume this batch (set to running)
-                        batch = batches[0]
-                        patch_url = f"{server_url}/batches/{batch['batchNumber']}"
-                        patch_data = {"status": "running"}
-                        async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
-                            if patch_resp.status == 200:
-                                logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
-                                return
-                # If all batches are completed or none exist, create new
-                post_url = f"{server_url}/batches"
-                post_data = {"machineId": machine_id}
-                async with session.post(post_url, json=post_data, timeout=10) as post_resp:
-                    if post_resp.status == 201:
-                        new_batch = await post_resp.json()
-                        logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
-    except Exception as e:
-        logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
-
     async def event_broadcaster(app):
         """Consume detection events and publish via MQTT (if configured) and optionally log."""
-        global mqtt_client
+        nonlocal mqtt_client
         mqtt_broker = getattr(args, 'mqtt_broker', None)
         mqtt_topic = getattr(args, 'mqtt_topic', 'nutricycle/detections')
         mqtt_esp_topic = getattr(args, 'mqtt_esp_topic', 'nutricycle/esp32')
@@ -450,6 +400,36 @@ async def resume_or_create_latest_batch(server_url: str, machine_id: str):
 
         # Get reference to the running event loop so MQTT thread can schedule async tasks
         loop = asyncio.get_event_loop()
+
+
+        # Resume or create latest batch (must be defined before on_esp32_control)
+        async def resume_or_create_latest_batch(server_url: str, machine_id: str):
+            """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
+            try:
+                async with ClientSession() as session:
+                    # Get latest batch for this machine
+                    url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+                    async with session.get(url, timeout=10) as resp:
+                        if resp.status == 200:
+                            batches = await resp.json()
+                            if batches and batches[0]['status'] != 'completed':
+                                # Resume this batch (set to running)
+                                batch = batches[0]
+                                patch_url = f"{server_url}/batches/{batch['batchNumber']}"
+                                patch_data = {"status": "running"}
+                                async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                                    if patch_resp.status == 200:
+                                        logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
+                                        return
+                        # If all batches are completed or none exist, create new
+                        post_url = f"{server_url}/batches"
+                        post_data = {"machineId": machine_id}
+                        async with session.post(post_url, json=post_data, timeout=10) as post_resp:
+                            if post_resp.status == 201:
+                                new_batch = await post_resp.json()
+                                logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+            except Exception as e:
+                logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
 
         # Callback for handling incoming MQTT control commands from ESP32
         def on_esp32_control(client, userdata, message):
@@ -482,8 +462,10 @@ async def resume_or_create_latest_batch(server_url: str, machine_id: str):
                             return
                         # Otherwise, mark as in progress and start new
                         batch_states[batch_number] = {'in_progress': True, 'finished': False, 'status': 'active'}
-                        # No resume_or_create_batch function defined; skip this call to avoid NameError
-                        logger.warning("resume_or_create_batch is not implemented. Skipping batch resume for batch_number: %s", batch_number)
+                        # Also call backend logic for batch_number
+                        asyncio.run_coroutine_threadsafe(
+                            resume_or_create_batch(batch_number, server_url), loop
+                        )
                     else:
                         # No batch number: always resume or create latest batch for this machine
                         logger.info("No batchNumber provided in ESP32 message for start. Will resume or create latest batch.")
@@ -528,6 +510,34 @@ async def resume_or_create_latest_batch(server_url: str, machine_id: str):
                         # Already handled above
                         pass
                     elif command == 'stop':
+                        # Move resume_or_create_latest_batch to top-level (outside on_esp32_control)
+                        async def resume_or_create_latest_batch(server_url: str, machine_id: str):
+                            """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
+                            try:
+                                async with ClientSession() as session:
+                                    # Get latest batch for this machine
+                                    url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+                                    async with session.get(url, timeout=10) as resp:
+                                        if resp.status == 200:
+                                            batches = await resp.json()
+                                            if batches and batches[0]['status'] != 'completed':
+                                                # Resume this batch (set to running)
+                                                batch = batches[0]
+                                                patch_url = f"{server_url}/batches/{batch['batchNumber']}"
+                                                patch_data = {"status": "running"}
+                                                async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                                                    if patch_resp.status == 200:
+                                                        logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
+                                                        return
+                                        # If all batches are completed or none exist, create new
+                                        post_url = f"{server_url}/batches"
+                                        post_data = {"machineId": machine_id}
+                                        async with session.post(post_url, json=post_data, timeout=10) as post_resp:
+                                            if post_resp.status == 201:
+                                                new_batch = await post_resp.json()
+                                                logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+                            except Exception as e:
+                                logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
                         # For 'stop', set batch status to idle
                         if batch_number:
                             logger.info(f"Stop command received for batch {batch_number}. Setting status to 'idle' via PATCH.")
@@ -763,13 +773,10 @@ async def resume_or_create_latest_batch(server_url: str, machine_id: str):
     parser.add_argument("--server-url", default="http://localhost:4000", help="URL of NutriCycle server for batch creation")
 
     args = parser.parse_args()
-    # Ensure no leading zeros in integer arguments (fix SyntaxError)
-    if isinstance(args.port, str):
-        args.port = int(args.port.lstrip('0') or '0')
-    if isinstance(args.mqtt_port, str):
-        args.mqtt_port = int(args.mqtt_port.lstrip('0') or '0')
+    
     # Parse source
-    args.source = int(args.source) if isinstance(args.source, str) and args.source.isdigit() else args.source
+    args.source = int(args.source) if args.source.isdigit() else args.source
+    
     # Resolve model path
     model_path = args.model
     if not os.path.exists(model_path):
@@ -975,11 +982,6 @@ async def resume_or_create_latest_batch(server_url: str, machine_id: str):
         app['event_broadcaster_task'] = asyncio.create_task(event_broadcaster(app))
         if getattr(args, 'persistent', False):
             app['camera_keepalive_task'] = asyncio.create_task(camera_keepalive(app))
-        # Automatically start or resume batch on server startup
-        server_url = getattr(args, 'server_url', 'http://localhost:4000')
-        machine_id = getattr(args, 'machine_id', None)
-        if machine_id:
-            asyncio.create_task(resume_or_create_latest_batch(server_url, machine_id))
 
     async def _cleanup_background_tasks(app):
         # Cancel background tasks
