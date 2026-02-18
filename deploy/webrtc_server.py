@@ -308,6 +308,38 @@ async def on_shutdown(app):
     await asyncio.gather(*coros)
     pcs.clear()
 
+    # Set latest batch to idle when machine/server goes offline
+    try:
+        machine_id = getattr(args, 'machine_id', None)
+        server_url = getattr(args, 'server_url', 'http://localhost:4000')
+        if machine_id:
+            url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+            async with ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        batches = await resp.json()
+                        if batches and isinstance(batches, list):
+                            batch = batches[0]
+                            batch_num = batch.get('batchNumber')
+                            if batch_num and batch.get('status') != 'completed':
+                                patch_url = f"{server_url}/batches/{batch_num}"
+                                patch_data = {"status": "idle"}
+                                async with session.patch(patch_url, json=patch_data) as patch_resp:
+                                    if patch_resp.status == 200:
+                                        logger.info(f"Set latest batch {batch_num} to 'idle' on shutdown.")
+                                    else:
+                                        logger.warning(f"Failed to set batch {batch_num} to idle: status {patch_resp.status}")
+                            else:
+                                logger.info("No active batch to set idle on shutdown.")
+                        else:
+                            logger.info("No batch found to set idle on shutdown.")
+                    else:
+                        logger.warning(f"Failed to fetch latest batch for idle on shutdown: status {resp.status}")
+        else:
+            logger.info("No machine_id configured, skipping batch idle on shutdown.")
+    except Exception as e:
+        logger.error(f"Failed to set latest batch to idle on shutdown: {e}", exc_info=True)
+
 
 def main():
     global args, model
