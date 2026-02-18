@@ -402,6 +402,34 @@ def main():
         loop = asyncio.get_event_loop()
 
 
+        # Resume or create a specific batch by batch_number
+        async def resume_or_create_batch(batch_number: str, server_url: str):
+            """Resume the batch with the given batch_number if not completed, or create a new one if completed/missing."""
+            try:
+                async with ClientSession() as session:
+                    # Get batch info
+                    url = f"{server_url}/batches/{batch_number}"
+                    async with session.get(url, timeout=10) as resp:
+                        if resp.status == 200:
+                            batch = await resp.json()
+                            if batch and batch.get('status') != 'completed':
+                                # Resume this batch (set to running)
+                                patch_url = f"{server_url}/batches/{batch_number}"
+                                patch_data = {"status": "running"}
+                                async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                                    if patch_resp.status == 200:
+                                        logger.info(f"Resumed batch {batch_number} (set to running)")
+                                        return
+                        # If batch is completed or does not exist, create new
+                        post_url = f"{server_url}/batches"
+                        post_data = {"machineId": machine_id}
+                        async with session.post(post_url, json=post_data, timeout=10) as post_resp:
+                            if post_resp.status == 201:
+                                new_batch = await post_resp.json()
+                                logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+            except Exception as e:
+                logger.error(f"Failed to resume or create batch {batch_number}: {e}", exc_info=True)
+
         # Resume or create latest batch (must be defined before on_esp32_control)
         async def resume_or_create_latest_batch(server_url: str, machine_id: str):
             """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
