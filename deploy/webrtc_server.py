@@ -420,20 +420,20 @@ def main():
                                     if patch_resp.status == 200:
                                         logger.info(f"Resumed batch {batch_number} (set to running)")
                                         return
-                        # If batch is completed or does not exist, create new
-                        post_url = f"{server_url}/batches"
-                        post_data = {"machineId": machine_id}
-                        async with session.post(post_url, json=post_data, timeout=10) as post_resp:
-                            if post_resp.status == 201:
-                                new_batch = await post_resp.json()
-                                logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+                    # If batch is completed or does not exist, create new
+                    post_url = f"{server_url}/batches"
+                    post_data = {"machineId": machine_id}
+                    async with session.post(post_url, json=post_data, timeout=10) as post_resp:
+                        if post_resp.status == 201:
+                            new_batch = await post_resp.json()
+                            logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
             except Exception as e:
                 logger.error(f"Failed to resume or create batch {batch_number}: {e}", exc_info=True)
 
 
         # Resume or create latest batch (always in scope)
         async def resume_or_create_latest_batch(server_url: str, machine_id: str):
-            """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
+            """Resume the latest batch with status not 'completed', or create a new batch if all are completed or none exist."""
             try:
                 async with ClientSession() as session:
                     # Get latest batch for this machine
@@ -450,13 +450,13 @@ def main():
                                     if patch_resp.status == 200:
                                         logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
                                         return
-                        # If all batches are completed or none exist, create new
-                        post_url = f"{server_url}/batches"
-                        post_data = {"machineId": machine_id}
-                        async with session.post(post_url, json=post_data, timeout=10) as post_resp:
-                            if post_resp.status == 201:
-                                new_batch = await post_resp.json()
-                                logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+                    # If all batches are completed or none exist, create new
+                    post_url = f"{server_url}/batches"
+                    post_data = {"machineId": machine_id}
+                    async with session.post(post_url, json=post_data, timeout=10) as post_resp:
+                        if post_resp.status == 201:
+                            new_batch = await post_resp.json()
+                            logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
             except Exception as e:
                 logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
 
