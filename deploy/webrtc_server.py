@@ -430,7 +430,8 @@ def main():
             except Exception as e:
                 logger.error(f"Failed to resume or create batch {batch_number}: {e}", exc_info=True)
 
-        # Resume or create latest batch (must be defined before on_esp32_control)
+
+        # Resume or create latest batch (always in scope)
         async def resume_or_create_latest_batch(server_url: str, machine_id: str):
             """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
             try:
@@ -458,6 +459,20 @@ def main():
                                 logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
             except Exception as e:
                 logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
+
+        # Patch batch status (always in scope)
+        async def patch_batch_status(batch_number: str, status: str, server_url: str):
+            endpoint = f"{server_url}/batches/{batch_number}"
+            payload = {"status": status}
+            try:
+                async with ClientSession() as session:
+                    async with session.patch(endpoint, json=payload, timeout=10) as response:
+                        logger.info(f"Server PATCH {endpoint} status: {response.status}")
+                        if response.status >= 400:
+                            text = await response.text()
+                            logger.error(f"Server error response: {text}")
+            except Exception as e:
+                logger.error(f"Failed to patch batch status: {e}", exc_info=True)
 
         # Callback for handling incoming MQTT control commands from ESP32
         def on_esp32_control(client, userdata, message):
@@ -538,34 +553,6 @@ def main():
                         # Already handled above
                         pass
                     elif command == 'stop':
-                        # Move resume_or_create_latest_batch to top-level (outside on_esp32_control)
-                        async def resume_or_create_latest_batch(server_url: str, machine_id: str):
-                            """Resume the latest batch with status not 'completed', or create a new batch if all are completed."""
-                            try:
-                                async with ClientSession() as session:
-                                    # Get latest batch for this machine
-                                    url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
-                                    async with session.get(url, timeout=10) as resp:
-                                        if resp.status == 200:
-                                            batches = await resp.json()
-                                            if batches and batches[0]['status'] != 'completed':
-                                                # Resume this batch (set to running)
-                                                batch = batches[0]
-                                                patch_url = f"{server_url}/batches/{batch['batchNumber']}"
-                                                patch_data = {"status": "running"}
-                                                async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
-                                                    if patch_resp.status == 200:
-                                                        logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
-                                                        return
-                                        # If all batches are completed or none exist, create new
-                                        post_url = f"{server_url}/batches"
-                                        post_data = {"machineId": machine_id}
-                                        async with session.post(post_url, json=post_data, timeout=10) as post_resp:
-                                            if post_resp.status == 201:
-                                                new_batch = await post_resp.json()
-                                                logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
-                            except Exception as e:
-                                logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
                         # For 'stop', set batch status to idle
                         if batch_number:
                             logger.info(f"Stop command received for batch {batch_number}. Setting status to 'idle' via PATCH.")
@@ -574,20 +561,6 @@ def main():
                             )
                         else:
                             logger.warning("No batchNumber provided in ESP32 message for stop.")
-
-                        # PATCH /batches/:batchNumber with {"status": ...}
-                    async def patch_batch_status(batch_number: str, status: str, server_url: str):
-                        endpoint = f"{server_url}/batches/{batch_number}"
-                        payload = {"status": status}
-                        try:
-                            async with ClientSession() as session:
-                                async with session.patch(endpoint, json=payload, timeout=10) as response:
-                                    logger.info(f"Server PATCH {endpoint} status: {response.status}")
-                                    if response.status >= 400:
-                                        text = await response.text()
-                                        logger.error(f"Server error response: {text}")
-                        except Exception as e:
-                            logger.error(f"Failed to patch batch status: {e}", exc_info=True)
                 else:
                     logger.warning(f"Unknown command from ESP32: {command}")
             except Exception as e:
