@@ -569,7 +569,30 @@ def main():
                                 patch_batch_status(batch_number, 'idle', server_url), loop
                             )
                         else:
-                            logger.warning("No batchNumber provided in ESP32 message for stop.")
+                            logger.info("No batchNumber provided in ESP32 message for stop. Will stop latest batch.")
+                            # Find and stop the latest batch for this machine
+                            async def stop_latest_batch():
+                                try:
+                                    url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+                                    async with ClientSession() as session:
+                                        async with session.get(url) as resp:
+                                            if resp.status == 200:
+                                                batches = await resp.json()
+                                                if batches and isinstance(batches, list):
+                                                    batch = batches[0]
+                                                    batch_num = batch.get('batchNumber')
+                                                    if batch_num and batch.get('status') != 'completed':
+                                                        logger.info(f"Stopping latest batch {batch_num} (set to idle)")
+                                                        await patch_batch_status(batch_num, 'idle', server_url)
+                                                    else:
+                                                        logger.info("No active batch to stop.")
+                                                else:
+                                                    logger.info("No batch found to stop.")
+                                            else:
+                                                logger.warning(f"Failed to fetch latest batch for stop: status {resp.status}")
+                                except Exception as e:
+                                    logger.error(f"Failed to stop latest batch: {e}", exc_info=True)
+                            asyncio.run_coroutine_threadsafe(stop_latest_batch(), loop)
                 else:
                     logger.warning(f"Unknown command from ESP32: {command}")
             except Exception as e:
