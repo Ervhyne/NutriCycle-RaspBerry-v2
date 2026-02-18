@@ -441,15 +441,22 @@ def main():
                     async with session.get(url, timeout=10) as resp:
                         if resp.status == 200:
                             batches = await resp.json()
-                            if batches and batches[0]['status'] != 'completed':
-                                # Resume this batch (set to running)
+                            if batches and isinstance(batches, list):
                                 batch = batches[0]
-                                patch_url = f"{server_url}/batches/{batch['batchNumber']}"
-                                patch_data = {"status": "running"}
-                                async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
-                                    if patch_resp.status == 200:
-                                        logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
-                                        return
+                                if batch.get('status') != 'completed':
+                                    # Resume this batch (set to running)
+                                    patch_url = f"{server_url}/batches/{batch['batchNumber']}"
+                                    patch_data = {"status": "running"}
+                                    async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                                        if patch_resp.status == 200:
+                                            logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
+                                            return
+                                else:
+                                    logger.info(f"Latest batch {batch['batchNumber']} is completed. Creating new batch.")
+                            else:
+                                logger.info("No existing batch found. Creating new batch.")
+                        else:
+                            logger.warning(f"Failed to fetch latest batch: status {resp.status}")
                     # If all batches are completed or none exist, create new
                     post_url = f"{server_url}/batches"
                     post_data = {"machineId": machine_id}
@@ -457,6 +464,8 @@ def main():
                         if post_resp.status == 201:
                             new_batch = await post_resp.json()
                             logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+                        else:
+                            logger.error(f"Failed to create new batch: status {post_resp.status}")
             except Exception as e:
                 logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
 
