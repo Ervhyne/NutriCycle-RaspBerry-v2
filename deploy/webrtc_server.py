@@ -528,6 +528,33 @@ def main():
                 command = payload.get('command')
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
+                # --- PATCH humidity/temperature to latest batch if present ---
+                if 'humidity' in payload and 'temperature' in payload:
+                    async def patch_latest_batch():
+                        try:
+                            url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+                            async with ClientSession() as session:
+                                async with session.get(url) as resp:
+                                    if resp.status == 200:
+                                        batches = await resp.json()
+                                        if batches and isinstance(batches, list):
+                                            batch = batches[0]
+                                            batch_num = batch.get('batchNumber')
+                                            if batch_num:
+                                                patch_url = f"{server_url}/batches/{batch_num}"
+                                                patch_data = {
+                                                    "humidity": payload["humidity"],
+                                                    "temperature": payload["temperature"]
+                                                }
+                                                async with session.patch(patch_url, json=patch_data) as patch_resp:
+                                                    if patch_resp.status == 200:
+                                                        logger.info(f"Patched batch {batch_num} with humidity/temperature")
+                                                    else:
+                                                        logger.warning(f"Failed to patch batch: status {patch_resp.status}")
+                        except Exception as e:
+                            logger.error(f"Failed to patch latest batch: {e}", exc_info=True)
+                    asyncio.run_coroutine_threadsafe(patch_latest_batch(), loop)
+
                 # --- CONTINUE UNFINISHED ACTIVITY LOGIC ---
                 batch_number = payload.get('batchNumber')
                 if not hasattr(on_esp32_control, 'batch_states'):
