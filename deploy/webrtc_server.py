@@ -528,8 +528,8 @@ def main():
                 command = payload.get('command')
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
-                # --- PATCH humidity/temperature/feedOutput/compostOutput to latest batch if present ---
-                if any(k in payload for k in ('humidity', 'temperature', 'feedOutput', 'compostOutput')):
+                # --- PATCH humidity/temperature/feedOutput/compostOutput/feedStatus to latest batch if present ---
+                if any(k in payload for k in ('humidity', 'temperature', 'feedOutput', 'compostOutput', 'feedStatus')):
                     async def patch_latest_batch():
                         try:
                             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
@@ -551,6 +551,8 @@ def main():
                                                     patch_data["feedOutput"] = payload["feedOutput"]
                                                 if 'compostOutput' in payload:
                                                     patch_data["compostOutput"] = payload["compostOutput"]
+                                                if 'feedStatus' in payload:
+                                                    patch_data["feedStatus"] = payload["feedStatus"]
                                                 if patch_data:
                                                     async with session.patch(patch_url, json=patch_data) as patch_resp:
                                                         if patch_resp.status == 200:
