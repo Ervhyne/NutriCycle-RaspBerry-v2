@@ -528,8 +528,8 @@ def main():
                 command = payload.get('command')
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
-                # --- PATCH humidity/temperature to latest batch if present ---
-                if 'humidity' in payload and 'temperature' in payload:
+                # --- PATCH humidity/temperature/feedOutput/compostOutput to latest batch if present ---
+                if any(k in payload for k in ('humidity', 'temperature', 'feedOutput', 'compostOutput')):
                     async def patch_latest_batch():
                         try:
                             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
@@ -542,15 +542,21 @@ def main():
                                             batch_num = batch.get('batchNumber')
                                             if batch_num:
                                                 patch_url = f"{server_url}/batches/{batch_num}"
-                                                patch_data = {
-                                                    "humidity": payload["humidity"],
-                                                    "temperature": payload["temperature"]
-                                                }
-                                                async with session.patch(patch_url, json=patch_data) as patch_resp:
-                                                    if patch_resp.status == 200:
-                                                        logger.info(f"Patched batch {batch_num} with humidity/temperature")
-                                                    else:
-                                                        logger.warning(f"Failed to patch batch: status {patch_resp.status}")
+                                                patch_data = {}
+                                                if 'humidity' in payload:
+                                                    patch_data["humidity"] = payload["humidity"]
+                                                if 'temperature' in payload:
+                                                    patch_data["temperature"] = payload["temperature"]
+                                                if 'feedOutput' in payload:
+                                                    patch_data["feedOutput"] = payload["feedOutput"]
+                                                if 'compostOutput' in payload:
+                                                    patch_data["compostOutput"] = payload["compostOutput"]
+                                                if patch_data:
+                                                    async with session.patch(patch_url, json=patch_data) as patch_resp:
+                                                        if patch_resp.status == 200:
+                                                            logger.info(f"Patched batch {batch_num} with {patch_data}")
+                                                        else:
+                                                            logger.warning(f"Failed to patch batch: status {patch_resp.status}")
                         except Exception as e:
                             logger.error(f"Failed to patch latest batch: {e}", exc_info=True)
                     asyncio.run_coroutine_threadsafe(patch_latest_batch(), loop)
