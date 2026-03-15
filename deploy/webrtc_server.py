@@ -645,15 +645,35 @@ def main():
 
         # Patch batch status (always in scope)
         async def patch_batch_status(batch_number: str, status: str, server_url: str):
+            if not machine_id:
+                logger.warning("Cannot patch batch status: machine_id not configured")
+                return
+
             endpoint = f"{server_url}/batches/{batch_number}"
             payload = {"status": status}
             try:
                 async with ClientSession() as session:
-                    async with session.patch(endpoint, json=payload, headers=_auth_headers(server_token, machine_id), timeout=10) as response:
-                        logger.info(f"Server PATCH {endpoint} status: {response.status}")
-                        if response.status >= 400:
-                            text = await response.text()
-                            logger.error(f"Server error response: {text}")
+                    async with session.patch(
+                        endpoint,
+                        json=payload,
+                        headers=_auth_headers(server_token, machine_id),
+                        timeout=10,
+                    ) as response:
+                        body_text = await response.text()
+                        logger.info(
+                            f"Server PATCH {endpoint} -> {response.status} (machine_id={machine_id}, payload={payload})"
+                        )
+
+                        # Helpful debug when backend ignores/rejects updates
+                        if body_text and body_text.strip():
+                            parsed = _try_parse_json_text(body_text, f"PATCH {endpoint}")
+                            if isinstance(parsed, dict) and 'status' in parsed:
+                                logger.info(f"PATCH response status field: {parsed.get('status')!r}")
+                            elif response.status >= 400:
+                                preview = body_text.replace('\n', ' ')[:500]
+                                logger.error(f"PATCH error body preview: {preview!r}")
+                        elif response.status >= 400:
+                            logger.error("PATCH failed with empty body")
             except Exception as e:
                 logger.error(f"Failed to patch batch status: {e}", exc_info=True)
 
@@ -726,12 +746,12 @@ def main():
                         if completed:
                             logger.info("START: last batch is completed, creating a new batch")
                             new_bn = await post_control_to_server('start', machine_id, server_url)
-                            if server_token and new_bn:
+                            if new_bn:
                                 await patch_batch_status(str(new_bn), 'running', server_url)
                             return
 
                         # If we can authenticate to /batches, verify the batch still exists.
-                        if candidate_bn and server_token:
+                        if candidate_bn:
                             url = f"{server_url}/batches/{candidate_bn}"
                             try:
                                 async with ClientSession() as session:
@@ -744,17 +764,14 @@ def main():
                                                 logger.info(f"START: batch {candidate_bn} is completed in DB, creating new")
                                                 _set_batch_completed(candidate_bn)
                                                 new_bn = await post_control_to_server('start', machine_id, server_url)
-                                                if server_token and new_bn:
+                                                if new_bn:
                                                     await patch_batch_status(str(new_bn), 'running', server_url)
                                                 return
 
                                             # Exists and not completed -> resume
                                             if incoming_bn:
                                                 _set_batch_started(incoming_bn)
-                                            if server_token:
-                                                await patch_batch_status(str(candidate_bn), 'running', server_url)
-                                            else:
-                                                logger.warning("START: cannot set DB status to running without --server-token (DB may stay idle)")
+                                            await patch_batch_status(str(candidate_bn), 'running', server_url)
                                             logger.info(f"START: resuming existing batch {candidate_bn} (verified in DB)")
                                             return
 
@@ -762,12 +779,14 @@ def main():
                                             logger.info(f"START: batch {candidate_bn} not found in DB, creating new")
                                             _set_batch_completed(candidate_bn)
                                             new_bn = await post_control_to_server('start', machine_id, server_url)
-                                            if server_token and new_bn:
+                                            if new_bn:
                                                 await patch_batch_status(str(new_bn), 'running', server_url)
                                             return
 
                                         if resp.status in (401, 403):
-                                            logger.warning("START: cannot verify batch in DB (unauthorized). Will resume local state or pass --server-token.")
+                                            body_text = await resp.text()
+                                            _try_parse_json_text(body_text, f"GET {url} unauthorized")
+                                            logger.warning("START: cannot verify batch in DB (unauthorized). Will resume local state.")
                                         else:
                                             logger.warning(f"START: cannot verify batch in DB (status {resp.status}). Will resume local state.")
                             except Exception as e:
@@ -776,16 +795,13 @@ def main():
                         if candidate_bn:
                             if incoming_bn:
                                 _set_batch_started(incoming_bn)
-                            if server_token:
-                                await patch_batch_status(str(candidate_bn), 'running', server_url)
-                            else:
-                                logger.warning("START: cannot set DB status to running without --server-token (DB may stay idle)")
+                            await patch_batch_status(str(candidate_bn), 'running', server_url)
                             logger.info(f"START: resuming existing batch {candidate_bn} (not verified)")
                             return
 
                         logger.info("START: no existing batch, creating a new batch")
                         new_bn = await post_control_to_server('start', machine_id, server_url)
-                        if server_token and new_bn:
+                        if new_bn:
                             await patch_batch_status(str(new_bn), 'running', server_url)
 
                     asyncio.run_coroutine_threadsafe(handle_start(), loop)
