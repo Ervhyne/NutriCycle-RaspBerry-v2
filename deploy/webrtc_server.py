@@ -612,7 +612,7 @@ def main():
                         logger.info(f"Sorting command received from ESP32 for batch {batch_number}. Sending POST to server.")
                         if batch_number:
                             asyncio.run_coroutine_threadsafe(
-                                post_stage_to_server('POST', command, batch_number, server_url), loop
+                                post_stage_update(command, batch_number, server_url), loop
                             )
                         else:
                             bn = _get_last_batch_number()
@@ -621,13 +621,13 @@ def main():
                             else:
                                 logger.info(f"Sorting: using last known batch {bn}")
                                 asyncio.run_coroutine_threadsafe(
-                                    post_stage_to_server('POST', command, bn, server_url), loop
+                                    post_stage_update(command, bn, server_url), loop
                                 )
                     elif command in ('grinding', 'dehydration', 'feed_completed'):
                         logger.info(f"{command.capitalize()} command received from ESP32 for batch {batch_number}. Sending PATCH to server.")
                         if batch_number:
                             asyncio.run_coroutine_threadsafe(
-                                post_stage_to_server('PATCH', command, batch_number, server_url), loop
+                                post_stage_update(command, batch_number, server_url), loop
                             )
                         else:
                             bn = _get_last_batch_number()
@@ -636,7 +636,7 @@ def main():
                             else:
                                 logger.info(f"{command}: using last known batch {bn}")
                                 asyncio.run_coroutine_threadsafe(
-                                    post_stage_to_server('PATCH', command, bn, server_url), loop
+                                    post_stage_update(command, bn, server_url), loop
                                 )
                     elif command == 'start':
                         # Already handled above
@@ -710,6 +710,20 @@ def main():
                         )
             except Exception as e:
                 logger.error(f"Failed to post stage to server: {e}", exc_info=True)
+
+
+        async def post_stage_update(stage: str, batch_number: str, server_url: str):
+            """Update current stage without user Authorization.
+
+            Prefer device control endpoint first (tokenless device auth via x-machine-id).
+            If backend rejects the action, fall back to legacy batch endpoints.
+            """
+            ok = await post_control_to_server(stage, machine_id, server_url, batch_number=batch_number)
+            if ok:
+                return
+
+            method = 'POST' if stage == 'sorting' else 'PATCH'
+            await post_stage_to_server(method, stage, batch_number, server_url)
 
 
         if mqtt_broker:
@@ -835,13 +849,18 @@ def main():
             logger.info("🔁 Camera keepalive stopped")
 
 
-    async def post_control_to_server(command: str, machine_id: str, server_url: str):
-        """POST start/stop command to server to trigger batch creation/completion."""
+    async def post_control_to_server(command: str, machine_id: str, server_url: str, batch_number: str | None = None) -> bool:
+        """POST device action to server (tokenless device auth via x-machine-id).
+
+        Returns True when the backend accepted the action (HTTP 200), else False.
+        """
         if not machine_id:
             logger.warning("Cannot post to server: machine_id not configured")
-            return
+            return False
 
         payload = {"action": command}
+        if batch_number:
+            payload["batchNumber"] = batch_number
         headers = _device_headers(machine_id)
 
         try:
@@ -866,14 +885,17 @@ def main():
                                 logger.info(f"Batch {batch_number} returned from control for machine {machine_id}")
                             else:
                                 logger.info(f"{command.capitalize()} command sent to server successfully")
+                            return True
                         else:
                             logger.error(f"Server returned error {response.status}: {body}")
-                        return
+                            return False
 
                 if last_status is not None:
                     logger.error(f"Control call failed: status={last_status} last_body={last_body_preview!r}")
+                return False
         except Exception as e:
             logger.error(f"Failed to post {command} to server: {e}", exc_info=True)
+            return False
 
 
     parser = argparse.ArgumentParser(description="WebRTC YOLO streaming server")
