@@ -723,7 +723,9 @@ def main():
 
                         if completed:
                             logger.info("START: last batch is completed, creating a new batch")
-                            await post_control_to_server('start', machine_id, server_url)
+                            new_bn = await post_control_to_server('start', machine_id, server_url)
+                            if server_token and new_bn:
+                                await patch_batch_status(str(new_bn), 'running', server_url)
                             return
 
                         # If we can authenticate to /batches, verify the batch still exists.
@@ -739,19 +741,27 @@ def main():
                                             if status == 'completed':
                                                 logger.info(f"START: batch {candidate_bn} is completed in DB, creating new")
                                                 _set_batch_completed(candidate_bn)
-                                                await post_control_to_server('start', machine_id, server_url)
+                                                new_bn = await post_control_to_server('start', machine_id, server_url)
+                                                if server_token and new_bn:
+                                                    await patch_batch_status(str(new_bn), 'running', server_url)
                                                 return
 
                                             # Exists and not completed -> resume
                                             if incoming_bn:
                                                 _set_batch_started(incoming_bn)
+                                            if server_token:
+                                                await patch_batch_status(str(candidate_bn), 'running', server_url)
+                                            else:
+                                                logger.warning("START: cannot set DB status to running without --server-token (DB may stay idle)")
                                             logger.info(f"START: resuming existing batch {candidate_bn} (verified in DB)")
                                             return
 
                                         if resp.status == 404:
                                             logger.info(f"START: batch {candidate_bn} not found in DB, creating new")
                                             _set_batch_completed(candidate_bn)
-                                            await post_control_to_server('start', machine_id, server_url)
+                                            new_bn = await post_control_to_server('start', machine_id, server_url)
+                                            if server_token and new_bn:
+                                                await patch_batch_status(str(new_bn), 'running', server_url)
                                             return
 
                                         if resp.status in (401, 403):
@@ -764,11 +774,17 @@ def main():
                         if candidate_bn:
                             if incoming_bn:
                                 _set_batch_started(incoming_bn)
+                            if server_token:
+                                await patch_batch_status(str(candidate_bn), 'running', server_url)
+                            else:
+                                logger.warning("START: cannot set DB status to running without --server-token (DB may stay idle)")
                             logger.info(f"START: resuming existing batch {candidate_bn} (not verified)")
                             return
 
                         logger.info("START: no existing batch, creating a new batch")
-                        await post_control_to_server('start', machine_id, server_url)
+                        new_bn = await post_control_to_server('start', machine_id, server_url)
+                        if server_token and new_bn:
+                            await patch_batch_status(str(new_bn), 'running', server_url)
 
                     asyncio.run_coroutine_threadsafe(handle_start(), loop)
 
@@ -994,13 +1010,17 @@ def main():
                         if batch_number:
                             logger.info(f"Batch {batch_number} created on server for machine {machine_id}")
                             _set_batch_started(str(batch_number))
+                            return str(batch_number)
                         else:
                             logger.info(f"{command.capitalize()} command sent to server successfully")
+                            return None
                     else:
                         text = await response.text()
                         logger.error(f"Server returned error {response.status}: {text}")
+                        return None
         except Exception as e:
             logger.error(f"Failed to post {command} to server: {e}", exc_info=True)
+            return None
 
 
     parser = argparse.ArgumentParser(description="WebRTC YOLO streaming server")
