@@ -439,6 +439,34 @@ def main():
         # Get reference to the running event loop so MQTT thread can schedule async tasks
         loop = asyncio.get_event_loop()
 
+        async def get_latest_batch_number() -> str | None:
+            """Fetch latest batchNumber for this machine from the server."""
+            if not machine_id:
+                logger.warning("Cannot fetch latest batch: machine_id not configured")
+                return None
+            url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+            try:
+                async with ClientSession() as session:
+                    async with session.get(url, timeout=10) as resp:
+                        text = await resp.text()
+                        if resp.status != 200:
+                            preview = (text or '').replace('\n', ' ')[:300]
+                            logger.warning(f"Failed to fetch latest batch (status {resp.status}): {preview!r}")
+                            return None
+                        try:
+                            data = json.loads(text) if text else None
+                        except Exception:
+                            preview = (text or '').replace('\n', ' ')[:300]
+                            logger.warning(f"Latest batch response is not JSON: {preview!r}")
+                            return None
+                        if isinstance(data, list) and data:
+                            bn = data[0].get('batchNumber') if isinstance(data[0], dict) else None
+                            return str(bn) if bn else None
+                        return None
+            except Exception as e:
+                logger.warning(f"Failed to fetch latest batch: {e}")
+                return None
+
 
         # Resume or create a specific batch by batch_number
         async def resume_or_create_batch(batch_number: str, server_url: str):
@@ -592,7 +620,15 @@ def main():
                                 post_stage_to_server('POST', command, batch_number, server_url), loop
                             )
                         else:
-                            logger.warning("No batchNumber provided in ESP32 message for sorting.")
+                            async def post_sorting_latest():
+                                bn = await get_latest_batch_number()
+                                if not bn:
+                                    logger.warning("Sorting: no batchNumber provided and no latest batch found")
+                                    return
+                                logger.info(f"Sorting: using latest batch {bn}")
+                                await post_stage_to_server('POST', command, bn, server_url)
+
+                            asyncio.run_coroutine_threadsafe(post_sorting_latest(), loop)
                     elif command in ('grinding', 'dehydration', 'feed_completed'):
                         logger.info(f"{command.capitalize()} command received from ESP32 for batch {batch_number}. Sending PATCH to server.")
                         if batch_number:
@@ -600,7 +636,15 @@ def main():
                                 post_stage_to_server('PATCH', command, batch_number, server_url), loop
                             )
                         else:
-                            logger.warning(f"No batchNumber provided in ESP32 message for {command}.")
+                            async def post_stage_latest():
+                                bn = await get_latest_batch_number()
+                                if not bn:
+                                    logger.warning(f"{command}: no batchNumber provided and no latest batch found")
+                                    return
+                                logger.info(f"{command}: using latest batch {bn}")
+                                await post_stage_to_server('PATCH', command, bn, server_url)
+
+                            asyncio.run_coroutine_threadsafe(post_stage_latest(), loop)
                     elif command == 'start':
                         # Already handled above
                         pass
