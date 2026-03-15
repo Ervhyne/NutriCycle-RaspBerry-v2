@@ -13,8 +13,10 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -28,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _auth_headers(server_token: str | None):
+def _auth_headers(server_token: Optional[str]):
     headers = {
         'Accept': 'application/json'
     }
@@ -48,6 +50,75 @@ def _try_parse_json_text(text: str, context: str):
         preview = raw.replace('\n', ' ')[:300]
         logger.warning(f"{context}: non-JSON response body preview: {preview!r}")
         return None
+
+
+# Persisted device/batch state so START can resume unfinished batch
+STATE_FILE = Path(__file__).with_name('device_state.json')
+device_state_lock = threading.Lock()
+device_state = {
+    'batch_number': None,
+    'batch_completed': False,
+    'updated_at': None,
+}
+
+
+def _load_device_state() -> None:
+    try:
+        if not STATE_FILE.exists():
+            return
+        raw = STATE_FILE.read_text(encoding='utf-8')
+        if not raw.strip():
+            return
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return
+        with device_state_lock:
+            if 'batch_number' in data:
+                device_state['batch_number'] = data.get('batch_number')
+            if 'batch_completed' in data:
+                device_state['batch_completed'] = bool(data.get('batch_completed', False))
+            if 'updated_at' in data:
+                device_state['updated_at'] = data.get('updated_at')
+    except Exception as e:
+        logger.warning(f"Failed to load device_state.json: {e}")
+
+
+def _save_device_state() -> None:
+    try:
+        with device_state_lock:
+            payload = {
+                'batch_number': device_state.get('batch_number'),
+                'batch_completed': bool(device_state.get('batch_completed', False)),
+                'updated_at': device_state.get('updated_at'),
+            }
+        STATE_FILE.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+    except Exception as e:
+        logger.warning(f"Failed to save device_state.json: {e}")
+
+
+def _get_batch_state():
+    with device_state_lock:
+        bn = device_state.get('batch_number')
+        completed = bool(device_state.get('batch_completed', False))
+    return (str(bn) if bn else None, completed)
+
+
+def _set_batch_started(batch_number: Optional[str]) -> None:
+    with device_state_lock:
+        if batch_number:
+            device_state['batch_number'] = str(batch_number)
+        device_state['batch_completed'] = False
+        device_state['updated_at'] = time.time()
+    _save_device_state()
+
+
+def _set_batch_completed(batch_number: Optional[str]) -> None:
+    with device_state_lock:
+        if batch_number:
+            device_state['batch_number'] = str(batch_number)
+        device_state['batch_completed'] = True
+        device_state['updated_at'] = time.time()
+    _save_device_state()
 
 # Global args
 args = None
@@ -641,11 +712,28 @@ def main():
                 batch_states = on_esp32_control.batch_states
 
                 if command == 'start':
-                    # Start should not require /batches access (often protected -> 401).
-                    # Always use the working device control endpoint.
+                    # Auto resume:
+                    # - If last known batch is NOT completed, continue it (do NOT create new batch).
+                    # - If no batch OR completed, create a new batch via /machines/device/control.
+                    current_bn, completed = _get_batch_state()
+                    if completed:
+                        logger.info("START: last batch is completed, creating a new batch")
+                        asyncio.run_coroutine_threadsafe(
+                            post_control_to_server('start', machine_id, server_url), loop
+                        )
+                        return
+
                     if batch_number:
-                        batch_states[batch_number] = {'in_progress': True, 'finished': False, 'status': 'active'}
-                    logger.info("Sending START to server via /machines/device/control")
+                        _set_batch_started(str(batch_number))
+                        batch_states[str(batch_number)] = {'in_progress': True, 'finished': False, 'status': 'active'}
+                        logger.info(f"START: resuming existing batch {batch_number} (no new batch created)")
+                        return
+
+                    if current_bn:
+                        logger.info(f"START: resuming existing batch {current_bn} (no new batch created)")
+                        return
+
+                    logger.info("START: no existing batch, creating a new batch")
                     asyncio.run_coroutine_threadsafe(
                         post_control_to_server('start', machine_id, server_url), loop
                     )
@@ -668,6 +756,12 @@ def main():
                         batch_states[batch_number]['finished'] = True
                         batch_states[batch_number]['in_progress'] = False
                         batch_states[batch_number]['status'] = 'finished'
+                    _set_batch_completed(str(batch_number))
+
+                elif command in ('feed_completed', 'reset') and not batch_number:
+                    current_bn, _completed = _get_batch_state()
+                    if current_bn:
+                        _set_batch_completed(current_bn)
 
                 # --- ORIGINAL LOGIC ---
                 if command in ('start', 'stop', 'sorting', 'grinding', 'dehydration', 'feed_completed'):
@@ -865,6 +959,7 @@ def main():
                         batch_number = data.get('batchNumber')
                         if batch_number:
                             logger.info(f"Batch {batch_number} created on server for machine {machine_id}")
+                            _set_batch_started(str(batch_number))
                         else:
                             logger.info(f"{command.capitalize()} command sent to server successfully")
                     else:
@@ -908,6 +1003,8 @@ def main():
     parser.add_argument("--server-token", default=None, help="Bearer token for protected /batches endpoints (optional)")
 
     args = parser.parse_args()
+
+    _load_device_state()
     
     # Parse source
     args.source = int(args.source) if args.source.isdigit() else args.source
