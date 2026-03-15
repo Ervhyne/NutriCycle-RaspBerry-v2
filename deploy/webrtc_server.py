@@ -34,6 +34,24 @@ def _device_headers(machine_id: str | None):
     return {'x-machine-id': machine_id} if machine_id else {}
 
 
+def _base_url_root(server_url: str) -> str:
+    base = (server_url or '').rstrip('/')
+    if base.endswith('/api'):
+        return base[:-4]
+    return base
+
+
+def _url_variants(server_url: str, path: str) -> list[str]:
+    """Return URL candidates that may exist on the backend.
+
+    Some deployments mount REST routes under '/api', others at root.
+    We try '/api' first, then root.
+    """
+    root = _base_url_root(server_url)
+    p = '/' + (path or '').lstrip('/')
+    return [f"{root}/api{p}", f"{root}{p}"]
+
+
 # Persist last known batchNumber so ESP32 stage commands can work without
 # calling protected GET /batches?machineId=... endpoints.
 STATE_FILE = Path(__file__).with_name('device_state.json')
@@ -378,12 +396,14 @@ async def on_shutdown(app):
         server_url = getattr(args, 'server_url', 'http://localhost:4000')
         last_bn = _get_last_batch_number()
         if last_bn:
-            patch_url = f"{server_url}/batches/{last_bn}"
             patch_data = {"status": "idle"}
             async with ClientSession() as session:
                 logger.info(f"[Shutdown] Patching last known batch {last_bn} to 'idle' ...")
-                async with session.patch(patch_url, json=patch_data, headers=_device_headers(machine_id), timeout=10) as patch_resp:
-                    logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
+                for patch_url in _url_variants(server_url, f"/batches/{last_bn}"):
+                    async with session.patch(patch_url, json=patch_data, headers=_device_headers(machine_id), timeout=10) as patch_resp:
+                        logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
+                        if patch_resp.status != 404:
+                            break
         else:
             logger.info("[Shutdown] No last batch known; skipping batch idle on shutdown.")
     except Exception as e:
@@ -515,15 +535,18 @@ def main():
 
         # Patch batch status (always in scope)
         async def patch_batch_status(batch_number: str, status: str, server_url: str):
-            endpoint = f"{server_url}/batches/{batch_number}"
             payload = {"status": status}
             try:
                 async with ClientSession() as session:
-                    async with session.patch(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
-                        logger.info(f"Server PATCH {endpoint} status: {response.status}")
-                        if response.status >= 400:
-                            text = await response.text()
-                            logger.error(f"Server error response: {text}")
+                    for endpoint in _url_variants(server_url, f"/batches/{batch_number}"):
+                        async with session.patch(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
+                            logger.info(f"Server PATCH {endpoint} status: {response.status}")
+                            if response.status == 404:
+                                continue
+                            if response.status >= 400:
+                                text = await response.text()
+                                logger.error(f"Server error response: {text}")
+                            break
             except Exception as e:
                 logger.error(f"Failed to patch batch status: {e}", exc_info=True)
 
@@ -557,8 +580,6 @@ def main():
                             if not batch_num:
                                 logger.warning("Sensor patch: no batchNumber provided and no last batch known")
                                 return
-
-                            patch_url = f"{server_url}/batches/{batch_num}"
                             patch_data = {}
                             if 'humidity' in payload:
                                 patch_data["humidity"] = payload["humidity"]
@@ -574,13 +595,22 @@ def main():
                                 return
 
                             async with ClientSession() as session:
-                                async with session.patch(patch_url, json=patch_data, headers=_device_headers(machine_id), timeout=10) as patch_resp:
-                                    if patch_resp.status == 200:
-                                        logger.info(f"Patched batch {batch_num} with {patch_data}")
-                                    else:
+                                last_status = None
+                                last_body_preview = None
+                                for patch_url in _url_variants(server_url, f"/batches/{batch_num}"):
+                                    async with session.patch(patch_url, json=patch_data, headers=_device_headers(machine_id), timeout=10) as patch_resp:
+                                        last_status = patch_resp.status
+                                        if patch_resp.status == 200:
+                                            logger.info(f"Patched batch {batch_num} with {patch_data}")
+                                            return
                                         body = await patch_resp.text()
-                                        preview = (body or '').replace('\n', ' ')[:300]
-                                        logger.warning(f"Failed to patch batch {batch_num}: status {patch_resp.status} body={preview!r}")
+                                        last_body_preview = (body or '').replace('\n', ' ')[:300]
+                                        if patch_resp.status == 404:
+                                            continue
+                                        logger.warning(f"Failed to patch batch {batch_num}: status {patch_resp.status} body={last_body_preview!r}")
+                                        return
+                                if last_status is not None:
+                                    logger.warning(f"Failed to patch batch {batch_num}: status {last_status} body={last_body_preview!r}")
                         except Exception as e:
                             logger.error(f"Failed to patch latest batch: {e}", exc_info=True)
                     asyncio.run_coroutine_threadsafe(patch_latest_batch(), loop)
@@ -685,22 +715,39 @@ def main():
             POST: Create a new BatchProcess for the batch (used for 'sorting' stage)
             PATCH: Update the existing BatchProcess for the batch (used for 'grinding', 'dehydration', 'feed_completed')
             """
-            endpoint = f"{server_url}/batches/{batch_number}/process"
             payload = {"feedStatus": stage}
             try:
                 async with ClientSession() as session:
-                    if method == 'POST':
-                        async with session.post(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
-                            logger.info(f"Server POST {endpoint} status: {response.status}")
-                            if response.status >= 400:
-                                text = await response.text()
-                                logger.error(f"Server error response: {text}")
-                    elif method == 'PATCH':
-                        async with session.patch(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
-                            logger.info(f"Server PATCH {endpoint} status: {response.status}")
-                            if response.status >= 400:
-                                text = await response.text()
-                                logger.error(f"Server error response: {text}")
+                    candidates = _url_variants(server_url, f"/batches/{batch_number}/process")
+                    last_status = None
+                    last_body_preview = None
+
+                    for endpoint in candidates:
+                        if method == 'POST':
+                            async with session.post(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
+                                last_status = response.status
+                                body = await response.text()
+                                last_body_preview = (body or '').replace('\n', ' ')[:500]
+                                logger.info(f"Server POST {endpoint} status: {response.status}")
+                                if response.status == 404:
+                                    continue
+                                if response.status >= 400:
+                                    logger.error(f"Server error response: {body}")
+                                return
+                        elif method == 'PATCH':
+                            async with session.patch(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
+                                last_status = response.status
+                                body = await response.text()
+                                last_body_preview = (body or '').replace('\n', ' ')[:500]
+                                logger.info(f"Server PATCH {endpoint} status: {response.status}")
+                                if response.status == 404:
+                                    continue
+                                if response.status >= 400:
+                                    logger.error(f"Server error response: {body}")
+                                return
+
+                    if last_status is not None:
+                        logger.error(f"Stage update failed for batch {batch_number}: all endpoints 404? last_status={last_status} last_body={last_body_preview!r}")
             except Exception as e:
                 logger.error(f"Failed to post stage to server: {e}", exc_info=True)
 
