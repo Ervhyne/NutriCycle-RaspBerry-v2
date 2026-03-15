@@ -31,13 +31,11 @@ logger = logging.getLogger(__name__)
 
 
 def _auth_headers(server_token: Optional[str], machine_id: Optional[str] = None):
+    # NOTE: /batches endpoints are expected to work without auth headers.
+    # We intentionally do NOT send Authorization bearer tokens here.
     headers = {
         'Accept': 'application/json'
     }
-    if machine_id:
-        headers['x-machine-id'] = machine_id
-    if server_token:
-        headers['Authorization'] = f"Bearer {server_token}"
     return headers
 
 
@@ -437,7 +435,7 @@ async def on_shutdown(app):
                     elif resp.status in (401, 403):
                         body_text = await resp.text()
                         _try_parse_json_text(body_text, f"[Shutdown] GET {url} unauthorized")
-                        logger.warning("[Shutdown] Unauthorized fetching latest batch. If your server protects /batches, pass --server-token.")
+                        logger.warning("[Shutdown] Unauthorized fetching latest batch.")
                     else:
                         body_text = await resp.text()
                         _try_parse_json_text(body_text, f"[Shutdown] GET {url} failed")
@@ -564,7 +562,7 @@ def main():
                         elif resp.status in (401, 403):
                             body_text = await resp.text()
                             _try_parse_json_text(body_text, f"GET {url} unauthorized")
-                            logger.warning("Unauthorized reading batch. Falling back to /machines/device/control start (or pass --server-token).")
+                            logger.warning("Unauthorized reading batch. Falling back to /machines/device/control start.")
                             await post_control_to_server('start', machine_id, server_url)
                             return
                     # If batch is completed or does not exist, create new
@@ -581,7 +579,7 @@ def main():
                         elif post_resp.status in (401, 403):
                             body_text = await post_resp.text()
                             _try_parse_json_text(body_text, f"POST {post_url} unauthorized")
-                            logger.error("Failed to create new batch: unauthorized (401/403). Provide --server-token.")
+                            logger.error("Failed to create new batch: unauthorized (401/403).")
                         else:
                             body_text = await post_resp.text()
                             _try_parse_json_text(body_text, f"POST {post_url} failed")
@@ -618,7 +616,7 @@ def main():
                         elif resp.status in (401, 403):
                             body_text = await resp.text()
                             _try_parse_json_text(body_text, f"GET {url} unauthorized")
-                            logger.error("Failed to fetch latest batch: unauthorized (401/403). Falling back to /machines/device/control start (or pass --server-token).")
+                            logger.error("Failed to fetch latest batch: unauthorized (401/403). Falling back to /machines/device/control start.")
                             await post_control_to_server('start', machine_id, server_url)
                             return
                         else:
