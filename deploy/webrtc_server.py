@@ -491,7 +491,8 @@ def main():
                         elif resp.status in (401, 403):
                             body_text = await resp.text()
                             _try_parse_json_text(body_text, f"GET {url} unauthorized")
-                            logger.warning("Unauthorized reading batch. If your server protects /batches, pass --server-token.")
+                            logger.warning("Unauthorized reading batch. Falling back to /machines/device/control start (or pass --server-token).")
+                            await post_control_to_server('start', machine_id, server_url)
                             return
                     # If batch is completed or does not exist, create new
                     post_url = f"{server_url}/batches"
@@ -544,7 +545,8 @@ def main():
                         elif resp.status in (401, 403):
                             body_text = await resp.text()
                             _try_parse_json_text(body_text, f"GET {url} unauthorized")
-                            logger.error("Failed to fetch latest batch: unauthorized (401/403). Provide --server-token.")
+                            logger.error("Failed to fetch latest batch: unauthorized (401/403). Falling back to /machines/device/control start (or pass --server-token).")
+                            await post_control_to_server('start', machine_id, server_url)
                             return
                         else:
                             body_text = await resp.text()
@@ -639,38 +641,26 @@ def main():
                 batch_states = on_esp32_control.batch_states
 
                 if command == 'start':
+                    # Start should not require /batches access (often protected -> 401).
+                    # Always use the working device control endpoint.
                     if batch_number:
-                        machine_status = 'active'
-                        state = batch_states.get(batch_number, {})
-                        if state.get('status') == 'active' and not state.get('finished'):
-                            logger.info(f"Continuing unfinished activity for batch {batch_number} (already running)")
-                            # Already running, skip re-initialization
-                            return
-                        elif state.get('status') == 'idle' and not state.get('finished'):
-                            logger.info(f"Resuming idle batch {batch_number}, continuing process")
-                            batch_states[batch_number]['status'] = 'active'
-                            batch_states[batch_number]['in_progress'] = True
-                            # Continue process (do not re-initialize)
-                            return
-                        # Otherwise, mark as in progress and start new
                         batch_states[batch_number] = {'in_progress': True, 'finished': False, 'status': 'active'}
-                        # Also call backend logic for batch_number
-                        asyncio.run_coroutine_threadsafe(
-                            resume_or_create_batch(batch_number, server_url), loop
-                        )
-                    else:
-                        # No batch number: always resume or create latest batch for this machine
-                        logger.info("No batchNumber provided in ESP32 message for start. Will resume or create latest batch.")
-                        asyncio.run_coroutine_threadsafe(
-                            resume_or_create_latest_batch(server_url, machine_id), loop
-                        )
-                elif command == 'stop' and batch_number:
-                    # Mark batch as idle (not finished, can be resumed)
-                    if batch_number in batch_states:
+                    logger.info("Sending START to server via /machines/device/control")
+                    asyncio.run_coroutine_threadsafe(
+                        post_control_to_server('start', machine_id, server_url), loop
+                    )
+
+                elif command == 'stop':
+                    # Stop should not require /batches access (often protected -> 401).
+                    # Always use the working device control endpoint.
+                    if batch_number and batch_number in batch_states:
                         batch_states[batch_number]['status'] = 'idle'
                         batch_states[batch_number]['in_progress'] = False
                         batch_states[batch_number]['finished'] = False
-                        # Do not mark as finished, so it can be resumed
+                    logger.info("Sending STOP to server via /machines/device/control")
+                    asyncio.run_coroutine_threadsafe(
+                        post_control_to_server('stop', machine_id, server_url), loop
+                    )
                 elif command in ('feed_completed', 'reset') and batch_number:
                     # Mark as finished
                     machine_status = 'finished'
@@ -702,38 +692,8 @@ def main():
                         # Already handled above
                         pass
                     elif command == 'stop':
-                        # For 'stop', set batch status to idle
-                        if batch_number:
-                            logger.info(f"Stop command received for batch {batch_number}. Setting status to 'idle' via PATCH.")
-                            asyncio.run_coroutine_threadsafe(
-                                patch_batch_status(batch_number, 'idle', server_url), loop
-                            )
-                        else:
-                            logger.info("No batchNumber provided in ESP32 message for stop. Will stop latest batch.")
-                            # Find and stop the latest batch for this machine
-                            async def stop_latest_batch():
-                                try:
-                                    url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
-                                    async with ClientSession() as session:
-                                        async with session.get(url, headers=_auth_headers(server_token)) as resp:
-                                            if resp.status == 200:
-                                                body_text = await resp.text()
-                                                batches = _try_parse_json_text(body_text, f"GET {url}")
-                                                if batches and isinstance(batches, list):
-                                                    batch = batches[0]
-                                                    batch_num = batch.get('batchNumber')
-                                                    if batch_num and batch.get('status') != 'completed':
-                                                        logger.info(f"Stopping latest batch {batch_num} (set to idle)")
-                                                        await patch_batch_status(batch_num, 'idle', server_url)
-                                                    else:
-                                                        logger.info("No active batch to stop.")
-                                                else:
-                                                    logger.info("No batch found to stop.")
-                                            else:
-                                                logger.warning(f"Failed to fetch latest batch for stop: status {resp.status}")
-                                except Exception as e:
-                                    logger.error(f"Failed to stop latest batch: {e}", exc_info=True)
-                            asyncio.run_coroutine_threadsafe(stop_latest_batch(), loop)
+                        # Already handled above
+                        pass
                 else:
                     logger.warning(f"Unknown command from ESP32: {command}")
             except Exception as e:
