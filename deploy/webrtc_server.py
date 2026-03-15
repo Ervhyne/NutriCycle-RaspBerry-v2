@@ -715,19 +715,62 @@ def main():
                     # Auto resume:
                     # - If last known batch is NOT completed, continue it (do NOT create new batch).
                     # - If no batch OR completed, create a new batch via /machines/device/control.
-                    if batch_number:
-                        _set_batch_started(str(batch_number))
-                        batch_states[str(batch_number)] = {'in_progress': True, 'finished': False, 'status': 'active'}
+                    # - If batch is missing from DB (deleted), treat as completed/missing and create new.
+                    async def handle_start():
+                        incoming_bn = str(batch_number) if batch_number else None
+                        current_bn, completed = _get_batch_state()
+                        candidate_bn = incoming_bn or current_bn
 
-                    current_bn, completed = _get_batch_state()
-                    if current_bn and not completed:
-                        logger.info(f"START: resuming existing batch {current_bn} (no new batch created)")
-                        return
+                        if completed:
+                            logger.info("START: last batch is completed, creating a new batch")
+                            await post_control_to_server('start', machine_id, server_url)
+                            return
 
-                    logger.info("START: creating new batch via /machines/device/control")
-                    asyncio.run_coroutine_threadsafe(
-                        post_control_to_server('start', machine_id, server_url), loop
-                    )
+                        # If we can authenticate to /batches, verify the batch still exists.
+                        if candidate_bn and server_token:
+                            url = f"{server_url}/batches/{candidate_bn}"
+                            try:
+                                async with ClientSession() as session:
+                                    async with session.get(url, headers=_auth_headers(server_token), timeout=10) as resp:
+                                        if resp.status == 200:
+                                            body_text = await resp.text()
+                                            batch = _try_parse_json_text(body_text, f"GET {url}")
+                                            status = batch.get('status') if isinstance(batch, dict) else None
+                                            if status == 'completed':
+                                                logger.info(f"START: batch {candidate_bn} is completed in DB, creating new")
+                                                _set_batch_completed(candidate_bn)
+                                                await post_control_to_server('start', machine_id, server_url)
+                                                return
+
+                                            # Exists and not completed -> resume
+                                            if incoming_bn:
+                                                _set_batch_started(incoming_bn)
+                                            logger.info(f"START: resuming existing batch {candidate_bn} (verified in DB)")
+                                            return
+
+                                        if resp.status == 404:
+                                            logger.info(f"START: batch {candidate_bn} not found in DB, creating new")
+                                            _set_batch_completed(candidate_bn)
+                                            await post_control_to_server('start', machine_id, server_url)
+                                            return
+
+                                        if resp.status in (401, 403):
+                                            logger.warning("START: cannot verify batch in DB (unauthorized). Will resume local state or pass --server-token.")
+                                        else:
+                                            logger.warning(f"START: cannot verify batch in DB (status {resp.status}). Will resume local state.")
+                            except Exception as e:
+                                logger.warning(f"START: verify batch failed: {e}. Will resume local state.")
+
+                        if candidate_bn:
+                            if incoming_bn:
+                                _set_batch_started(incoming_bn)
+                            logger.info(f"START: resuming existing batch {candidate_bn} (not verified)")
+                            return
+
+                        logger.info("START: no existing batch, creating a new batch")
+                        await post_control_to_server('start', machine_id, server_url)
+
+                    asyncio.run_coroutine_threadsafe(handle_start(), loop)
 
                 elif command == 'stop':
                     # Stop should not require /batches access (often protected -> 401).
@@ -994,6 +1037,8 @@ def main():
     parser.add_argument("--server-token", default=None, help="Bearer token for protected /batches endpoints (optional)")
 
     args = parser.parse_args()
+
+    _load_device_state()
     
     # Parse source
     args.source = int(args.source) if args.source.isdigit() else args.source
