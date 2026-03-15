@@ -1065,9 +1065,9 @@ def main():
     parser.add_argument("--mqtt-username", default=None, help="MQTT username")
     parser.add_argument("--mqtt-password", default=None, help="MQTT password")
     parser.add_argument("--mqtt-qos", type=int, default=1, help="MQTT QoS")
-    parser.add_argument("--control-token", default=None, help="Bearer token required for /control HTTP POSTs")
+    parser.add_argument("--control-token", default=None, help="DEPRECATED (ignored): /control does not require Authorization")
     parser.add_argument("--server-url", default="http://localhost:4000", help="URL of NutriCycle server for batch creation")
-    parser.add_argument("--server-token", default=None, help="Bearer token for protected /batches endpoints (optional)")
+    parser.add_argument("--server-token", default=None, help="DEPRECATED (ignored): /batches requests send no Authorization")
 
     args = parser.parse_args()
 
@@ -1157,14 +1157,7 @@ def main():
         except Exception:
             return web.Response(status=400, text="Invalid JSON")
 
-        # Authorization (optional)
-        if getattr(args, 'control_token', None):
-            auth = request.headers.get('Authorization', '')
-            if not auth.startswith('Bearer '):
-                return web.Response(status=401, text='Missing Authorization')
-            token = auth.split(None, 1)[1]
-            if token != args.control_token:
-                return web.Response(status=403, text='Forbidden')
+        # No Bearer-token authorization required.
 
         machine_id = data.get('machine_id')
         if machine_id != args.machine_id:
