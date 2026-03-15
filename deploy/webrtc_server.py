@@ -456,6 +456,12 @@ def main():
                                     if patch_resp.status == 200:
                                         logger.info(f"Resumed batch {batch_number} (set to running)")
                                         return
+                                    else:
+                                        body = await patch_resp.text()
+                                        logger.error(f"Failed to resume batch {batch_number}: status {patch_resp.status}, body: {body}")
+                        else:
+                            body = await resp.text()
+                            logger.error(f"Failed to fetch batch {batch_number}: status {resp.status}, body: {body}")
                     # If batch is completed or does not exist, create new
                     post_url = f"{server_url}/batches"
                     post_data = {"machineId": machine_id}
@@ -487,12 +493,16 @@ def main():
                                         if patch_resp.status == 200:
                                             logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
                                             return
+                                        else:
+                                            body = await patch_resp.text()
+                                            logger.error(f"Failed to resume latest batch {batch['batchNumber']}: status {patch_resp.status}, body: {body}")
                                 else:
                                     logger.info(f"Latest batch {batch['batchNumber']} is completed. Creating new batch.")
                             else:
                                 logger.info("No existing batch found. Creating new batch.")
                         else:
-                            logger.warning(f"Failed to fetch latest batch: status {resp.status}")
+                            body = await resp.text()
+                            logger.error(f"Failed to fetch latest batch: status {resp.status}, body: {body}")
                     # If all batches are completed or none exist, create new
                     post_url = f"{server_url}/batches"
                     post_data = {"machineId": machine_id}
@@ -501,7 +511,8 @@ def main():
                             new_batch = await post_resp.json()
                             logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
                         else:
-                            logger.error(f"Failed to create new batch: status {post_resp.status}")
+                            body = await post_resp.text()
+                            logger.error(f"Failed to create new batch: status {post_resp.status}, body: {body}")
             except Exception as e:
                 logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
 
