@@ -30,10 +30,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _auth_headers(server_token: Optional[str]):
+def _auth_headers(server_token: Optional[str], machine_id: Optional[str] = None):
     headers = {
         'Accept': 'application/json'
     }
+    if machine_id:
+        headers['x-machine-id'] = machine_id
     if server_token:
         headers['Authorization'] = f"Bearer {server_token}"
     return headers
@@ -410,7 +412,7 @@ async def on_shutdown(app):
             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
             async with ClientSession() as session:
                 logger.info(f"[Shutdown] Fetching latest batch for machine_id={machine_id} ...")
-                async with session.get(url, headers=_auth_headers(server_token)) as resp:
+                async with session.get(url, headers=_auth_headers(server_token, machine_id)) as resp:
                     logger.info(f"[Shutdown] GET {url} status: {resp.status}")
                     if resp.status == 200:
                         body_text = await resp.text()
@@ -422,7 +424,7 @@ async def on_shutdown(app):
                                 patch_url = f"{server_url}/batches/{batch_num}"
                                 patch_data = {"status": "idle"}
                                 logger.info(f"[Shutdown] Patching batch {batch_num} to 'idle' ...")
-                                async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token)) as patch_resp:
+                                async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token, machine_id)) as patch_resp:
                                     logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
                                     if patch_resp.status == 200:
                                         logger.info(f"[Shutdown] Set latest batch {batch_num} to 'idle' on shutdown.")
@@ -547,7 +549,7 @@ def main():
                 async with ClientSession() as session:
                     # Get batch info
                     url = f"{server_url}/batches/{batch_number}"
-                    async with session.get(url, headers=_auth_headers(server_token), timeout=10) as resp:
+                    async with session.get(url, headers=_auth_headers(server_token, machine_id), timeout=10) as resp:
                         if resp.status == 200:
                             body_text = await resp.text()
                             batch = _try_parse_json_text(body_text, f"GET {url}")
@@ -555,7 +557,7 @@ def main():
                                 # Resume this batch (set to running)
                                 patch_url = f"{server_url}/batches/{batch_number}"
                                 patch_data = {"status": "running"}
-                                async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token), timeout=10) as patch_resp:
+                                async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token, machine_id), timeout=10) as patch_resp:
                                     if patch_resp.status == 200:
                                         logger.info(f"Resumed batch {batch_number} (set to running)")
                                         return
@@ -568,7 +570,7 @@ def main():
                     # If batch is completed or does not exist, create new
                     post_url = f"{server_url}/batches"
                     post_data = {"machineId": machine_id}
-                    async with session.post(post_url, json=post_data, headers=_auth_headers(server_token), timeout=10) as post_resp:
+                    async with session.post(post_url, json=post_data, headers=_auth_headers(server_token, machine_id), timeout=10) as post_resp:
                         if post_resp.status == 201:
                             body_text = await post_resp.text()
                             new_batch = _try_parse_json_text(body_text, f"POST {post_url}")
@@ -595,7 +597,7 @@ def main():
                 async with ClientSession() as session:
                     # Get latest batch for this machine
                     url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
-                    async with session.get(url, headers=_auth_headers(server_token), timeout=10) as resp:
+                    async with session.get(url, headers=_auth_headers(server_token, machine_id), timeout=10) as resp:
                         if resp.status == 200:
                             body_text = await resp.text()
                             batches = _try_parse_json_text(body_text, f"GET {url}")
@@ -605,7 +607,7 @@ def main():
                                     # Resume this batch (set to running)
                                     patch_url = f"{server_url}/batches/{batch['batchNumber']}"
                                     patch_data = {"status": "running"}
-                                    async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token), timeout=10) as patch_resp:
+                                    async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token, machine_id), timeout=10) as patch_resp:
                                         if patch_resp.status == 200:
                                             logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
                                             return
@@ -626,7 +628,7 @@ def main():
                     # If all batches are completed or none exist, create new
                     post_url = f"{server_url}/batches"
                     post_data = {"machineId": machine_id}
-                    async with session.post(post_url, json=post_data, headers=_auth_headers(server_token), timeout=10) as post_resp:
+                    async with session.post(post_url, json=post_data, headers=_auth_headers(server_token, machine_id), timeout=10) as post_resp:
                         if post_resp.status == 201:
                             body_text = await post_resp.text()
                             new_batch = _try_parse_json_text(body_text, f"POST {post_url}")
@@ -647,7 +649,7 @@ def main():
             payload = {"status": status}
             try:
                 async with ClientSession() as session:
-                    async with session.patch(endpoint, json=payload, headers=_auth_headers(server_token), timeout=10) as response:
+                    async with session.patch(endpoint, json=payload, headers=_auth_headers(server_token, machine_id), timeout=10) as response:
                         logger.info(f"Server PATCH {endpoint} status: {response.status}")
                         if response.status >= 400:
                             text = await response.text()
@@ -675,7 +677,7 @@ def main():
                         try:
                             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
                             async with ClientSession() as session:
-                                async with session.get(url, headers=_auth_headers(server_token)) as resp:
+                                async with session.get(url, headers=_auth_headers(server_token, machine_id)) as resp:
                                     if resp.status == 200:
                                         body_text = await resp.text()
                                         batches = _try_parse_json_text(body_text, f"GET {url}")
@@ -696,7 +698,7 @@ def main():
                                                 if 'feedStatus' in payload:
                                                     patch_data["feedStatus"] = payload["feedStatus"]
                                                 if patch_data:
-                                                    async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token)) as patch_resp:
+                                                    async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token, machine_id)) as patch_resp:
                                                         if patch_resp.status == 200:
                                                             logger.info(f"Patched batch {batch_num} with {patch_data}")
                                                         else:
@@ -733,7 +735,7 @@ def main():
                             url = f"{server_url}/batches/{candidate_bn}"
                             try:
                                 async with ClientSession() as session:
-                                    async with session.get(url, headers=_auth_headers(server_token), timeout=10) as resp:
+                                    async with session.get(url, headers=_auth_headers(server_token, machine_id), timeout=10) as resp:
                                         if resp.status == 200:
                                             body_text = await resp.text()
                                             batch = _try_parse_json_text(body_text, f"GET {url}")
@@ -853,13 +855,13 @@ def main():
             try:
                 async with ClientSession() as session:
                     if method == 'POST':
-                        async with session.post(endpoint, json=payload, headers=_auth_headers(server_token), timeout=10) as response:
+                        async with session.post(endpoint, json=payload, headers=_auth_headers(server_token, machine_id), timeout=10) as response:
                             logger.info(f"Server POST {endpoint} status: {response.status}")
                             if response.status >= 400:
                                 text = await response.text()
                                 logger.error(f"Server error response: {text}")
                     elif method == 'PATCH':
-                        async with session.patch(endpoint, json=payload, headers=_auth_headers(server_token), timeout=10) as response:
+                        async with session.patch(endpoint, json=payload, headers=_auth_headers(server_token, machine_id), timeout=10) as response:
                             logger.info(f"Server PATCH {endpoint} status: {response.status}")
                             if response.status >= 400:
                                 text = await response.text()
