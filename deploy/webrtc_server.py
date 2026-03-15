@@ -746,8 +746,22 @@ def main():
                                     logger.error(f"Server error response: {body}")
                                 return
 
+                    # If the backend doesn't implement /process routes, fall back to updating the batch itself.
+                    if last_status == 404:
+                        for endpoint in _url_variants(server_url, f"/batches/{batch_number}"):
+                            async with session.patch(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
+                                body = await response.text()
+                                logger.info(f"Fallback PATCH {endpoint} status: {response.status}")
+                                if response.status == 404:
+                                    continue
+                                if response.status >= 400:
+                                    logger.error(f"Fallback error response: {body}")
+                                return
+
                     if last_status is not None:
-                        logger.error(f"Stage update failed for batch {batch_number}: all endpoints 404? last_status={last_status} last_body={last_body_preview!r}")
+                        logger.error(
+                            f"Stage update failed for batch {batch_number}: status={last_status} last_body={last_body_preview!r}"
+                        )
             except Exception as e:
                 logger.error(f"Failed to post stage to server: {e}", exc_info=True)
 
