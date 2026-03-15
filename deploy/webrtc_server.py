@@ -994,8 +994,6 @@ def main():
     parser.add_argument("--server-token", default=None, help="Bearer token for protected /batches endpoints (optional)")
 
     args = parser.parse_args()
-
-    _load_device_state()
     
     # Parse source
     args.source = int(args.source) if args.source.isdigit() else args.source
