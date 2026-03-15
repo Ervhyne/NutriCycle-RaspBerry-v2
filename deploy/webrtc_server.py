@@ -396,7 +396,7 @@ def main():
                     
                     # Send status update to NutriCycle API
                     if api_base_url and machine_id and machine_secret:
-                        status_endpoint = f"{api_base_url}/api/machines/{machine_id}/device/status"
+                        status_endpoint = f"{api_base_url}/machines/{machine_id}/device/status"
                         status_payload = {
                             'secret': machine_secret,
                             'status': 'online',
@@ -1105,7 +1105,7 @@ def main():
         if api_base_url and machine_id and machine_secret:
             try:
                 async with ClientSession() as session:
-                    status_endpoint = f"{api_base_url}/machines/{machine_id}/device/status"
+                    status_endpoint = f"{api_base_url}/api/machines/{machine_id}/device/status"
                     await session.post(status_endpoint, json={
                         'secret': machine_secret,
                         'status': 'offline',
