@@ -27,6 +27,28 @@ from ultralytics import YOLO
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _auth_headers(server_token: str | None):
+    headers = {
+        'Accept': 'application/json'
+    }
+    if server_token:
+        headers['Authorization'] = f"Bearer {server_token}"
+    return headers
+
+
+def _try_parse_json_text(text: str, context: str):
+    raw = (text or '').strip()
+    if not raw:
+        logger.warning(f"{context}: empty response body")
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        preview = raw.replace('\n', ' ')[:300]
+        logger.warning(f"{context}: non-JSON response body preview: {preview!r}")
+        return None
+
 # Global args
 args = None
 model = None
@@ -312,14 +334,16 @@ async def on_shutdown(app):
     try:
         machine_id = getattr(args, 'machine_id', None)
         server_url = getattr(args, 'server_url', 'http://localhost:4000')
+        server_token = getattr(args, 'server_token', None)
         if machine_id:
             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
             async with ClientSession() as session:
                 logger.info(f"[Shutdown] Fetching latest batch for machine_id={machine_id} ...")
-                async with session.get(url) as resp:
+                async with session.get(url, headers=_auth_headers(server_token)) as resp:
                     logger.info(f"[Shutdown] GET {url} status: {resp.status}")
                     if resp.status == 200:
-                        batches = await resp.json()
+                        body_text = await resp.text()
+                        batches = _try_parse_json_text(body_text, f"[Shutdown] GET {url}")
                         if batches and isinstance(batches, list):
                             batch = batches[0]
                             batch_num = batch.get('batchNumber')
@@ -327,7 +351,7 @@ async def on_shutdown(app):
                                 patch_url = f"{server_url}/batches/{batch_num}"
                                 patch_data = {"status": "idle"}
                                 logger.info(f"[Shutdown] Patching batch {batch_num} to 'idle' ...")
-                                async with session.patch(patch_url, json=patch_data) as patch_resp:
+                                async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token)) as patch_resp:
                                     logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
                                     if patch_resp.status == 200:
                                         logger.info(f"[Shutdown] Set latest batch {batch_num} to 'idle' on shutdown.")
@@ -337,7 +361,13 @@ async def on_shutdown(app):
                                 logger.info("[Shutdown] No active batch to set idle on shutdown.")
                         else:
                             logger.info("[Shutdown] No batch found to set idle on shutdown.")
+                    elif resp.status in (401, 403):
+                        body_text = await resp.text()
+                        _try_parse_json_text(body_text, f"[Shutdown] GET {url} unauthorized")
+                        logger.warning("[Shutdown] Unauthorized fetching latest batch. If your server protects /batches, pass --server-token.")
                     else:
+                        body_text = await resp.text()
+                        _try_parse_json_text(body_text, f"[Shutdown] GET {url} failed")
                         logger.warning(f"[Shutdown] Failed to fetch latest batch for idle on shutdown: status {resp.status}")
         else:
             logger.info("[Shutdown] No machine_id configured, skipping batch idle on shutdown.")
@@ -433,6 +463,7 @@ def main():
         mqtt_qos = getattr(args, 'mqtt_qos', 1)
         server_url = getattr(args, 'server_url', 'http://localhost:4000')
         machine_id = getattr(args, 'machine_id', None)
+        server_token = getattr(args, 'server_token', None)
 
         # Get reference to the running event loop so MQTT thread can schedule async tasks
         loop = asyncio.get_event_loop()
@@ -445,24 +476,42 @@ def main():
                 async with ClientSession() as session:
                     # Get batch info
                     url = f"{server_url}/batches/{batch_number}"
-                    async with session.get(url, timeout=10) as resp:
+                    async with session.get(url, headers=_auth_headers(server_token), timeout=10) as resp:
                         if resp.status == 200:
-                            batch = await resp.json()
+                            body_text = await resp.text()
+                            batch = _try_parse_json_text(body_text, f"GET {url}")
                             if batch and batch.get('status') != 'completed':
                                 # Resume this batch (set to running)
                                 patch_url = f"{server_url}/batches/{batch_number}"
                                 patch_data = {"status": "running"}
-                                async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                                async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token), timeout=10) as patch_resp:
                                     if patch_resp.status == 200:
                                         logger.info(f"Resumed batch {batch_number} (set to running)")
                                         return
+                        elif resp.status in (401, 403):
+                            body_text = await resp.text()
+                            _try_parse_json_text(body_text, f"GET {url} unauthorized")
+                            logger.warning("Unauthorized reading batch. If your server protects /batches, pass --server-token.")
+                            return
                     # If batch is completed or does not exist, create new
                     post_url = f"{server_url}/batches"
                     post_data = {"machineId": machine_id}
-                    async with session.post(post_url, json=post_data, timeout=10) as post_resp:
+                    async with session.post(post_url, json=post_data, headers=_auth_headers(server_token), timeout=10) as post_resp:
                         if post_resp.status == 201:
-                            new_batch = await post_resp.json()
-                            logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+                            body_text = await post_resp.text()
+                            new_batch = _try_parse_json_text(body_text, f"POST {post_url}")
+                            if isinstance(new_batch, dict) and new_batch.get('batchNumber'):
+                                logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+                            else:
+                                logger.info("Created new batch (server returned non-JSON or missing batchNumber)")
+                        elif post_resp.status in (401, 403):
+                            body_text = await post_resp.text()
+                            _try_parse_json_text(body_text, f"POST {post_url} unauthorized")
+                            logger.error("Failed to create new batch: unauthorized (401/403). Provide --server-token.")
+                        else:
+                            body_text = await post_resp.text()
+                            _try_parse_json_text(body_text, f"POST {post_url} failed")
+                            logger.error(f"Failed to create new batch: status {post_resp.status}")
             except Exception as e:
                 logger.error(f"Failed to resume or create batch {batch_number}: {e}", exc_info=True)
 
@@ -474,16 +523,17 @@ def main():
                 async with ClientSession() as session:
                     # Get latest batch for this machine
                     url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
-                    async with session.get(url, timeout=10) as resp:
+                    async with session.get(url, headers=_auth_headers(server_token), timeout=10) as resp:
                         if resp.status == 200:
-                            batches = await resp.json()
+                            body_text = await resp.text()
+                            batches = _try_parse_json_text(body_text, f"GET {url}")
                             if batches and isinstance(batches, list):
                                 batch = batches[0]
                                 if batch.get('status') != 'completed':
                                     # Resume this batch (set to running)
                                     patch_url = f"{server_url}/batches/{batch['batchNumber']}"
                                     patch_data = {"status": "running"}
-                                    async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                                    async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token), timeout=10) as patch_resp:
                                         if patch_resp.status == 200:
                                             logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
                                             return
@@ -491,16 +541,29 @@ def main():
                                     logger.info(f"Latest batch {batch['batchNumber']} is completed. Creating new batch.")
                             else:
                                 logger.info("No existing batch found. Creating new batch.")
+                        elif resp.status in (401, 403):
+                            body_text = await resp.text()
+                            _try_parse_json_text(body_text, f"GET {url} unauthorized")
+                            logger.error("Failed to fetch latest batch: unauthorized (401/403). Provide --server-token.")
+                            return
                         else:
+                            body_text = await resp.text()
+                            _try_parse_json_text(body_text, f"GET {url} failed")
                             logger.warning(f"Failed to fetch latest batch: status {resp.status}")
                     # If all batches are completed or none exist, create new
                     post_url = f"{server_url}/batches"
                     post_data = {"machineId": machine_id}
-                    async with session.post(post_url, json=post_data, timeout=10) as post_resp:
+                    async with session.post(post_url, json=post_data, headers=_auth_headers(server_token), timeout=10) as post_resp:
                         if post_resp.status == 201:
-                            new_batch = await post_resp.json()
-                            logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+                            body_text = await post_resp.text()
+                            new_batch = _try_parse_json_text(body_text, f"POST {post_url}")
+                            if isinstance(new_batch, dict) and new_batch.get('batchNumber'):
+                                logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
+                            else:
+                                logger.info("Created new batch (server returned non-JSON or missing batchNumber)")
                         else:
+                            body_text = await post_resp.text()
+                            _try_parse_json_text(body_text, f"POST {post_url} failed")
                             logger.error(f"Failed to create new batch: status {post_resp.status}")
             except Exception as e:
                 logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
@@ -511,7 +574,7 @@ def main():
             payload = {"status": status}
             try:
                 async with ClientSession() as session:
-                    async with session.patch(endpoint, json=payload, timeout=10) as response:
+                    async with session.patch(endpoint, json=payload, headers=_auth_headers(server_token), timeout=10) as response:
                         logger.info(f"Server PATCH {endpoint} status: {response.status}")
                         if response.status >= 400:
                             text = await response.text()
@@ -524,7 +587,12 @@ def main():
             # No machine_status changes here; only batch_states are updated
             """Handle start/stop and process stage commands from ESP32 via MQTT."""
             try:
-                payload = json.loads(message.payload.decode())
+                raw = message.payload.decode(errors='replace').strip()
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except Exception:
+                    # Allow plain-text commands like: start, stop
+                    payload = {'command': raw}
                 command = payload.get('command')
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
@@ -534,9 +602,10 @@ def main():
                         try:
                             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
                             async with ClientSession() as session:
-                                async with session.get(url) as resp:
+                                async with session.get(url, headers=_auth_headers(server_token)) as resp:
                                     if resp.status == 200:
-                                        batches = await resp.json()
+                                        body_text = await resp.text()
+                                        batches = _try_parse_json_text(body_text, f"GET {url}")
                                         if batches and isinstance(batches, list):
                                             batch = batches[0]
                                             batch_num = batch.get('batchNumber')
@@ -554,7 +623,7 @@ def main():
                                                 if 'feedStatus' in payload:
                                                     patch_data["feedStatus"] = payload["feedStatus"]
                                                 if patch_data:
-                                                    async with session.patch(patch_url, json=patch_data) as patch_resp:
+                                                    async with session.patch(patch_url, json=patch_data, headers=_auth_headers(server_token)) as patch_resp:
                                                         if patch_resp.status == 200:
                                                             logger.info(f"Patched batch {batch_num} with {patch_data}")
                                                         else:
@@ -646,9 +715,10 @@ def main():
                                 try:
                                     url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
                                     async with ClientSession() as session:
-                                        async with session.get(url) as resp:
+                                        async with session.get(url, headers=_auth_headers(server_token)) as resp:
                                             if resp.status == 200:
-                                                batches = await resp.json()
+                                                body_text = await resp.text()
+                                                batches = _try_parse_json_text(body_text, f"GET {url}")
                                                 if batches and isinstance(batches, list):
                                                     batch = batches[0]
                                                     batch_num = batch.get('batchNumber')
@@ -679,13 +749,13 @@ def main():
             try:
                 async with ClientSession() as session:
                     if method == 'POST':
-                        async with session.post(endpoint, json=payload, timeout=10) as response:
+                        async with session.post(endpoint, json=payload, headers=_auth_headers(server_token), timeout=10) as response:
                             logger.info(f"Server POST {endpoint} status: {response.status}")
                             if response.status >= 400:
                                 text = await response.text()
                                 logger.error(f"Server error response: {text}")
                     elif method == 'PATCH':
-                        async with session.patch(endpoint, json=payload, timeout=10) as response:
+                        async with session.patch(endpoint, json=payload, headers=_auth_headers(server_token), timeout=10) as response:
                             logger.info(f"Server PATCH {endpoint} status: {response.status}")
                             if response.status >= 400:
                                 text = await response.text()
@@ -875,6 +945,7 @@ def main():
     parser.add_argument("--mqtt-qos", type=int, default=1, help="MQTT QoS")
     parser.add_argument("--control-token", default=None, help="Bearer token required for /control HTTP POSTs")
     parser.add_argument("--server-url", default="http://localhost:4000", help="URL of NutriCycle server for batch creation")
+    parser.add_argument("--server-token", default=None, help="Bearer token for protected /batches endpoints (optional)")
 
     args = parser.parse_args()
     
@@ -1105,7 +1176,7 @@ def main():
         if api_base_url and machine_id and machine_secret:
             try:
                 async with ClientSession() as session:
-                    status_endpoint = f"{api_base_url}/api/machines/{machine_id}/device/status"
+                    status_endpoint = f"{api_base_url}/machines/{machine_id}/device/status"
                     await session.post(status_endpoint, json={
                         'secret': machine_secret,
                         'status': 'offline',
