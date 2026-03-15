@@ -643,14 +643,11 @@ def main():
 
         # Patch batch status (always in scope)
         async def patch_batch_status(batch_number: str, status: str, server_url: str):
-            if not machine_id:
-                logger.warning("Cannot patch batch status: machine_id not configured")
-                return
-
             endpoint = f"{server_url}/batches/{batch_number}"
             payload = {"status": status}
             try:
                 async with ClientSession() as session:
+                    logger.info(f"Attempting batch status PATCH -> {endpoint} payload={payload}")
                     async with session.patch(
                         endpoint,
                         json=payload,
@@ -659,7 +656,7 @@ def main():
                     ) as response:
                         body_text = await response.text()
                         logger.info(
-                            f"Server PATCH {endpoint} -> {response.status} (machine_id={machine_id}, payload={payload})"
+                            f"Server PATCH {endpoint} -> {response.status} (payload={payload})"
                         )
 
                         # Helpful debug when backend ignores/rejects updates
