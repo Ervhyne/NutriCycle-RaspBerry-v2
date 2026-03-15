@@ -27,6 +27,11 @@ from ultralytics import YOLO
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _device_headers(machine_id: str | None):
+    """Headers used for device-to-server calls (no Bearer Authorization)."""
+    return {'x-machine-id': machine_id} if machine_id else {}
+
 # Global args
 args = None
 model = None
@@ -316,7 +321,7 @@ async def on_shutdown(app):
             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
             async with ClientSession() as session:
                 logger.info(f"[Shutdown] Fetching latest batch for machine_id={machine_id} ...")
-                async with session.get(url) as resp:
+                async with session.get(url, headers=_device_headers(machine_id)) as resp:
                     logger.info(f"[Shutdown] GET {url} status: {resp.status}")
                     if resp.status == 200:
                         batches = await resp.json()
@@ -327,7 +332,7 @@ async def on_shutdown(app):
                                 patch_url = f"{server_url}/batches/{batch_num}"
                                 patch_data = {"status": "idle"}
                                 logger.info(f"[Shutdown] Patching batch {batch_num} to 'idle' ...")
-                                async with session.patch(patch_url, json=patch_data) as patch_resp:
+                                async with session.patch(patch_url, json=patch_data, headers=_device_headers(machine_id)) as patch_resp:
                                     logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
                                     if patch_resp.status == 200:
                                         logger.info(f"[Shutdown] Set latest batch {batch_num} to 'idle' on shutdown.")
@@ -447,7 +452,7 @@ def main():
             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
             try:
                 async with ClientSession() as session:
-                    async with session.get(url, timeout=10) as resp:
+                    async with session.get(url, headers=_device_headers(machine_id), timeout=10) as resp:
                         text = await resp.text()
                         if resp.status != 200:
                             preview = (text or '').replace('\n', ' ')[:300]
@@ -498,7 +503,7 @@ def main():
             payload = {"status": status}
             try:
                 async with ClientSession() as session:
-                    async with session.patch(endpoint, json=payload, timeout=10) as response:
+                    async with session.patch(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
                         logger.info(f"Server PATCH {endpoint} status: {response.status}")
                         if response.status >= 400:
                             text = await response.text()
@@ -534,7 +539,7 @@ def main():
                         try:
                             url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
                             async with ClientSession() as session:
-                                async with session.get(url) as resp:
+                                async with session.get(url, headers=_device_headers(machine_id)) as resp:
                                     if resp.status == 200:
                                         batches = await resp.json()
                                         if batches and isinstance(batches, list):
@@ -554,7 +559,7 @@ def main():
                                                 if 'feedStatus' in payload:
                                                     patch_data["feedStatus"] = payload["feedStatus"]
                                                 if patch_data:
-                                                    async with session.patch(patch_url, json=patch_data) as patch_resp:
+                                                    async with session.patch(patch_url, json=patch_data, headers=_device_headers(machine_id)) as patch_resp:
                                                         if patch_resp.status == 200:
                                                             logger.info(f"Patched batch {batch_num} with {patch_data}")
                                                         else:
@@ -668,13 +673,13 @@ def main():
             try:
                 async with ClientSession() as session:
                     if method == 'POST':
-                        async with session.post(endpoint, json=payload, timeout=10) as response:
+                        async with session.post(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
                             logger.info(f"Server POST {endpoint} status: {response.status}")
                             if response.status >= 400:
                                 text = await response.text()
                                 logger.error(f"Server error response: {text}")
                     elif method == 'PATCH':
-                        async with session.patch(endpoint, json=payload, timeout=10) as response:
+                        async with session.patch(endpoint, json=payload, headers=_device_headers(machine_id), timeout=10) as response:
                             logger.info(f"Server PATCH {endpoint} status: {response.status}")
                             if response.status >= 400:
                                 text = await response.text()
@@ -862,7 +867,7 @@ def main():
     parser.add_argument("--mqtt-username", default=None, help="MQTT username")
     parser.add_argument("--mqtt-password", default=None, help="MQTT password")
     parser.add_argument("--mqtt-qos", type=int, default=1, help="MQTT QoS")
-    parser.add_argument("--control-token", default=None, help="Bearer token required for /control HTTP POSTs")
+    parser.add_argument("--control-token", default=None, help="DEPRECATED (ignored): /control does not require Authorization")
     parser.add_argument("--server-url", default="http://localhost:4000", help="URL of NutriCycle server for batch creation")
 
     args = parser.parse_args()
@@ -951,14 +956,7 @@ def main():
         except Exception:
             return web.Response(status=400, text="Invalid JSON")
 
-        # Authorization (optional)
-        if getattr(args, 'control_token', None):
-            auth = request.headers.get('Authorization', '')
-            if not auth.startswith('Bearer '):
-                return web.Response(status=401, text='Missing Authorization')
-            token = auth.split(None, 1)[1]
-            if token != args.control_token:
-                return web.Response(status=403, text='Forbidden')
+        # No Bearer-token authorization required.
 
         machine_id = data.get('machine_id')
         if machine_id != args.machine_id:
