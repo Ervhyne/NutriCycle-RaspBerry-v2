@@ -89,6 +89,16 @@ def _set_last_batch_number(machine_id: str | None, batch_number: str | None) -> 
     _save_device_state(state)
 
 
+def _url_variants(server_url: str, path: str) -> list[str]:
+    """Try both root and /api-mounted variants for a given path."""
+    base = (server_url or "").rstrip("/")
+    p = "/" + path.lstrip("/")
+    # If caller already includes /api, don't duplicate it.
+    if base.endswith("/api"):
+        return [f"{base}{p}", f"{base[:-4]}{p}"]
+    return [f"{base}{p}", f"{base}/api{p}"]
+
+
 class SharedCamera:
     """Singleton camera instance shared across all video tracks."""
     _instance = None
@@ -362,15 +372,17 @@ async def on_shutdown(app):
         server_url = getattr(args, 'server_url', 'http://localhost:4000')
         batch_num = _get_last_batch_number(machine_id)
         if machine_id and batch_num:
-            patch_url = f"{server_url}/batches/{batch_num}"
             patch_data = {"status": "idle"}
+            headers = {"x-machine-id": machine_id}
             async with ClientSession() as session:
                 logger.info(f"[Shutdown] Patching last batch {batch_num} to 'idle' ...")
-                async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
-                    logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
-                    if patch_resp.status >= 400:
+                for patch_url in _url_variants(server_url, f"batches/{batch_num}"):
+                    async with session.patch(patch_url, json=patch_data, headers=headers, timeout=10) as patch_resp:
+                        logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
+                        if patch_resp.status < 400:
+                            break
                         text = await patch_resp.text()
-                        logger.warning(f"[Shutdown] Failed to set batch {batch_num} to idle: {text}")
+                        logger.warning(f"[Shutdown] Failed PATCH {patch_url}: {text}")
         else:
             logger.info("[Shutdown] No cached batch to set idle on shutdown.")
     except Exception as e:
@@ -503,19 +515,19 @@ def main():
             """Tokenless device control endpoint; returns JSON (may contain batchNumber)."""
             if not machine_id:
                 return None
-            endpoint = f"{server_url}/machines/device/control"
             payload = {"action": action}
             if batch_number:
                 payload["batchNumber"] = batch_number
             headers = {"x-machine-id": machine_id}
             try:
                 async with ClientSession() as session:
-                    async with session.post(endpoint, json=payload, headers=headers, timeout=10) as resp:
-                        if resp.status == 200:
-                            return await resp.json()
-                        text = await resp.text()
-                        logger.warning(f"Device control failed {resp.status}: {text}")
-                        return None
+                    for endpoint in _url_variants(server_url, "machines/device/control"):
+                        async with session.post(endpoint, json=payload, headers=headers, timeout=10) as resp:
+                            if resp.status == 200:
+                                return await resp.json()
+                            text = await resp.text()
+                            logger.warning(f"Device control failed {resp.status} on {endpoint}: {text}")
+                    return None
             except Exception as e:
                 logger.error(f"Device control error: {e}", exc_info=True)
                 return None
@@ -537,13 +549,15 @@ def main():
 
         # Patch batch status (always in scope)
         async def patch_batch_status(batch_number: str, status: str, server_url: str):
-            endpoint = f"{server_url}/batches/{batch_number}"
             payload = {"status": status}
             try:
                 async with ClientSession() as session:
-                    async with session.patch(endpoint, json=payload, timeout=10) as response:
-                        logger.info(f"Server PATCH {endpoint} status: {response.status}")
-                        if response.status >= 400:
+                    headers = {"x-machine-id": machine_id} if machine_id else None
+                    for endpoint in _url_variants(server_url, f"batches/{batch_number}"):
+                        async with session.patch(endpoint, json=payload, headers=headers, timeout=10) as response:
+                            logger.info(f"Server PATCH {endpoint} status: {response.status}")
+                            if response.status < 400:
+                                return
                             text = await response.text()
                             logger.error(f"Server error response: {text}")
             except Exception as e:
@@ -567,7 +581,7 @@ def main():
                                 logger.warning("No cached batchNumber for sensor patch; skipping.")
                                 return
                             async with ClientSession() as session:
-                                patch_url = f"{server_url}/batches/{batch_num}"
+                                headers = {"x-machine-id": machine_id} if machine_id else None
                                 patch_data = {}
                                 if 'humidity' in payload:
                                     patch_data["humidity"] = payload["humidity"]
@@ -580,13 +594,14 @@ def main():
                                 if 'feedStatus' in payload:
                                     patch_data["feedStatus"] = payload["feedStatus"]
                                 if patch_data:
-                                    async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
-                                        if patch_resp.status == 200:
-                                            _set_last_batch_number(machine_id, batch_num)
-                                            logger.info(f"Patched batch {batch_num} with {patch_data}")
-                                        else:
+                                    for patch_url in _url_variants(server_url, f"batches/{batch_num}"):
+                                        async with session.patch(patch_url, json=patch_data, headers=headers, timeout=10) as patch_resp:
+                                            if patch_resp.status == 200:
+                                                _set_last_batch_number(machine_id, batch_num)
+                                                logger.info(f"Patched batch {batch_num} with {patch_data}")
+                                                return
                                             text = await patch_resp.text()
-                                            logger.warning(f"Failed to patch batch {batch_num}: {patch_resp.status} {text}")
+                                            logger.warning(f"Failed to patch batch {batch_num} on {patch_url}: {patch_resp.status} {text}")
                         except Exception as e:
                             logger.error(f"Failed to patch latest batch: {e}", exc_info=True)
                     asyncio.run_coroutine_threadsafe(patch_latest_batch(), loop)
@@ -670,14 +685,29 @@ def main():
                 logger.error(f"Error processing ESP32 control message: {e}", exc_info=True)
 
         async def post_stage_update(stage: str, batch_number: str, server_url: str, machine_id: str):
-            """Best-effort stage update: try device control endpoint first, then legacy batch routes."""
-            # 1) Prefer tokenless device control endpoint if backend supports stage actions.
-            data = await _post_device_control(stage, machine_id, server_url, batch_number=batch_number)
-            if data is not None:
-                return
+            """Best-effort stage update.
 
-            # 2) Legacy: /batches/{batch}/process (may not exist) then fallback to PATCH /batches/{batch}.
-            await post_stage_to_server('POST' if stage == 'sorting' else 'PATCH', stage, batch_number, server_url)
+            Backends we saw:
+            - /machines/device/control only supports start/stop (so don't send stage there)
+            - /batches/{batch}/process may not exist
+            So we patch the batch directly with feedStatus using x-machine-id header.
+            """
+            await patch_batch_feed_status(server_url, batch_number, stage, machine_id)
+
+
+        async def patch_batch_feed_status(server_url: str, batch_number: str, stage: str, machine_id: str | None):
+            headers = {"x-machine-id": machine_id} if machine_id else None
+            payload = {"feedStatus": stage}
+            async with ClientSession() as session:
+                for patch_url in _url_variants(server_url, f"batches/{batch_number}"):
+                    async with session.patch(patch_url, json=payload, headers=headers, timeout=10) as resp:
+                        logger.info(f"Stage PATCH {patch_url} status: {resp.status}")
+                        if resp.status < 400:
+                            return
+                        text = await resp.text()
+                        logger.error(f"Stage PATCH error response: {text}")
+                # If both variants failed, keep the old /process attempt as a last resort for older servers.
+                await post_stage_to_server('POST' if stage == 'sorting' else 'PATCH', stage, batch_number, server_url)
 
         async def post_stage_to_server(method: str, stage: str, batch_number: str, server_url: str):
             """
@@ -694,30 +724,14 @@ def main():
                             if response.status >= 400:
                                 text = await response.text()
                                 logger.error(f"Server error response: {text}")
-                                # fallback: patch the batch itself (some deployments don't have /process)
-                                await _patch_batch_feed_status(session, server_url, batch_number, stage)
                     elif method == 'PATCH':
                         async with session.patch(endpoint, json=payload, timeout=10) as response:
                             logger.info(f"Server PATCH {endpoint} status: {response.status}")
                             if response.status >= 400:
                                 text = await response.text()
                                 logger.error(f"Server error response: {text}")
-                                await _patch_batch_feed_status(session, server_url, batch_number, stage)
             except Exception as e:
                 logger.error(f"Failed to post stage to server: {e}", exc_info=True)
-
-
-        async def _patch_batch_feed_status(session: ClientSession, server_url: str, batch_number: str, stage: str):
-            patch_url = f"{server_url}/batches/{batch_number}"
-            patch_payload = {"feedStatus": stage}
-            try:
-                async with session.patch(patch_url, json=patch_payload, timeout=10) as patch_resp:
-                    logger.info(f"Fallback PATCH {patch_url} status: {patch_resp.status}")
-                    if patch_resp.status >= 400:
-                        text = await patch_resp.text()
-                        logger.error(f"Fallback PATCH error response: {text}")
-            except Exception as e:
-                logger.error(f"Fallback PATCH failed: {e}", exc_info=True)
 
 
         if mqtt_broker:
