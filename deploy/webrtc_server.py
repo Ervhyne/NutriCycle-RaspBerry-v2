@@ -41,6 +41,54 @@ latest_frame_jpeg = None
 latest_frame_lock = asyncio.Lock()
 
 
+# Persist the latest known batchNumber locally so we don't need to call
+# protected endpoints like GET /batches?machineId=... just to resolve "latest".
+STATE_FILE = Path(__file__).with_name("device_state.json")
+_last_batch_cache = {}
+
+
+def _load_device_state() -> dict:
+    try:
+        if STATE_FILE.exists():
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_device_state(state: dict) -> None:
+    try:
+        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except Exception:
+        # best-effort only
+        pass
+
+
+def _get_last_batch_number(machine_id: str | None) -> str | None:
+    if not machine_id:
+        return None
+    cached = _last_batch_cache.get(machine_id)
+    if cached:
+        return cached
+    state = _load_device_state()
+    batch_number = state.get("machines", {}).get(machine_id, {}).get("last_batch_number")
+    if batch_number:
+        _last_batch_cache[machine_id] = batch_number
+    return batch_number
+
+
+def _set_last_batch_number(machine_id: str | None, batch_number: str | None) -> None:
+    if not machine_id or not batch_number:
+        return
+    _last_batch_cache[machine_id] = batch_number
+    state = _load_device_state()
+    machines = state.setdefault("machines", {})
+    mstate = machines.setdefault(machine_id, {})
+    mstate["last_batch_number"] = batch_number
+    mstate["updated_at"] = time.time()
+    _save_device_state(state)
+
+
 class SharedCamera:
     """Singleton camera instance shared across all video tracks."""
     _instance = None
@@ -308,41 +356,25 @@ async def on_shutdown(app):
     await asyncio.gather(*coros)
     pcs.clear()
 
-    # Set latest batch to idle when machine/server goes offline
+    # Set last-known batch to idle when machine/server goes offline
     try:
         machine_id = getattr(args, 'machine_id', None)
         server_url = getattr(args, 'server_url', 'http://localhost:4000')
-        if machine_id:
-            url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+        batch_num = _get_last_batch_number(machine_id)
+        if machine_id and batch_num:
+            patch_url = f"{server_url}/batches/{batch_num}"
+            patch_data = {"status": "idle"}
             async with ClientSession() as session:
-                logger.info(f"[Shutdown] Fetching latest batch for machine_id={machine_id} ...")
-                async with session.get(url) as resp:
-                    logger.info(f"[Shutdown] GET {url} status: {resp.status}")
-                    if resp.status == 200:
-                        batches = await resp.json()
-                        if batches and isinstance(batches, list):
-                            batch = batches[0]
-                            batch_num = batch.get('batchNumber')
-                            if batch_num and batch.get('status') != 'completed':
-                                patch_url = f"{server_url}/batches/{batch_num}"
-                                patch_data = {"status": "idle"}
-                                logger.info(f"[Shutdown] Patching batch {batch_num} to 'idle' ...")
-                                async with session.patch(patch_url, json=patch_data) as patch_resp:
-                                    logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
-                                    if patch_resp.status == 200:
-                                        logger.info(f"[Shutdown] Set latest batch {batch_num} to 'idle' on shutdown.")
-                                    else:
-                                        logger.warning(f"[Shutdown] Failed to set batch {batch_num} to idle: status {patch_resp.status}")
-                            else:
-                                logger.info("[Shutdown] No active batch to set idle on shutdown.")
-                        else:
-                            logger.info("[Shutdown] No batch found to set idle on shutdown.")
-                    else:
-                        logger.warning(f"[Shutdown] Failed to fetch latest batch for idle on shutdown: status {resp.status}")
+                logger.info(f"[Shutdown] Patching last batch {batch_num} to 'idle' ...")
+                async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                    logger.info(f"[Shutdown] PATCH {patch_url} status: {patch_resp.status}")
+                    if patch_resp.status >= 400:
+                        text = await patch_resp.text()
+                        logger.warning(f"[Shutdown] Failed to set batch {batch_num} to idle: {text}")
         else:
-            logger.info("[Shutdown] No machine_id configured, skipping batch idle on shutdown.")
+            logger.info("[Shutdown] No cached batch to set idle on shutdown.")
     except Exception as e:
-        logger.error(f"[Shutdown] Failed to set latest batch to idle on shutdown: {e}", exc_info=True)
+        logger.error(f"[Shutdown] Failed to set cached batch to idle on shutdown: {e}", exc_info=True)
 
 
 def main():
@@ -467,43 +499,41 @@ def main():
                 logger.error(f"Failed to resume or create batch {batch_number}: {e}", exc_info=True)
 
 
-        # Resume or create latest batch (always in scope)
-        async def resume_or_create_latest_batch(server_url: str, machine_id: str):
-            """Resume the latest batch with status not 'completed', or create a new batch if all are completed or none exist."""
+        async def _post_device_control(action: str, machine_id: str, server_url: str, batch_number: str | None = None) -> dict | None:
+            """Tokenless device control endpoint; returns JSON (may contain batchNumber)."""
+            if not machine_id:
+                return None
+            endpoint = f"{server_url}/machines/device/control"
+            payload = {"action": action}
+            if batch_number:
+                payload["batchNumber"] = batch_number
+            headers = {"x-machine-id": machine_id}
             try:
                 async with ClientSession() as session:
-                    # Get latest batch for this machine
-                    url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
-                    async with session.get(url, timeout=10) as resp:
+                    async with session.post(endpoint, json=payload, headers=headers, timeout=10) as resp:
                         if resp.status == 200:
-                            batches = await resp.json()
-                            if batches and isinstance(batches, list):
-                                batch = batches[0]
-                                if batch.get('status') != 'completed':
-                                    # Resume this batch (set to running)
-                                    patch_url = f"{server_url}/batches/{batch['batchNumber']}"
-                                    patch_data = {"status": "running"}
-                                    async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
-                                        if patch_resp.status == 200:
-                                            logger.info(f"Resumed batch {batch['batchNumber']} (set to running)")
-                                            return
-                                else:
-                                    logger.info(f"Latest batch {batch['batchNumber']} is completed. Creating new batch.")
-                            else:
-                                logger.info("No existing batch found. Creating new batch.")
-                        else:
-                            logger.warning(f"Failed to fetch latest batch: status {resp.status}")
-                    # If all batches are completed or none exist, create new
-                    post_url = f"{server_url}/batches"
-                    post_data = {"machineId": machine_id}
-                    async with session.post(post_url, json=post_data, timeout=10) as post_resp:
-                        if post_resp.status == 201:
-                            new_batch = await post_resp.json()
-                            logger.info(f"Created new batch {new_batch['batchNumber']} (set to running)")
-                        else:
-                            logger.error(f"Failed to create new batch: status {post_resp.status}")
+                            return await resp.json()
+                        text = await resp.text()
+                        logger.warning(f"Device control failed {resp.status}: {text}")
+                        return None
             except Exception as e:
-                logger.error(f"Failed to resume or create latest batch: {e}", exc_info=True)
+                logger.error(f"Device control error: {e}", exc_info=True)
+                return None
+
+
+        async def _ensure_latest_batch_number(server_url: str, machine_id: str, hint_batch_number: str | None = None) -> str | None:
+            """Resolve a batchNumber without calling list endpoints."""
+            if hint_batch_number:
+                _set_last_batch_number(machine_id, hint_batch_number)
+                return hint_batch_number
+            cached = _get_last_batch_number(machine_id)
+            if cached:
+                return cached
+            data = await _post_device_control("start", machine_id, server_url)
+            batch_number = (data or {}).get("batchNumber")
+            if batch_number:
+                _set_last_batch_number(machine_id, batch_number)
+            return batch_number
 
         # Patch batch status (always in scope)
         async def patch_batch_status(batch_number: str, status: str, server_url: str):
@@ -528,37 +558,35 @@ def main():
                 command = payload.get('command')
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
-                # --- PATCH humidity/temperature/feedOutput/compostOutput/feedStatus to latest batch if present ---
+                # --- PATCH humidity/temperature/feedOutput/compostOutput/feedStatus to last-known batch if present ---
                 if any(k in payload for k in ('humidity', 'temperature', 'feedOutput', 'compostOutput', 'feedStatus')):
                     async def patch_latest_batch():
                         try:
-                            url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
+                            batch_num = payload.get('batchNumber') or _get_last_batch_number(machine_id)
+                            if not batch_num:
+                                logger.warning("No cached batchNumber for sensor patch; skipping.")
+                                return
                             async with ClientSession() as session:
-                                async with session.get(url) as resp:
-                                    if resp.status == 200:
-                                        batches = await resp.json()
-                                        if batches and isinstance(batches, list):
-                                            batch = batches[0]
-                                            batch_num = batch.get('batchNumber')
-                                            if batch_num:
-                                                patch_url = f"{server_url}/batches/{batch_num}"
-                                                patch_data = {}
-                                                if 'humidity' in payload:
-                                                    patch_data["humidity"] = payload["humidity"]
-                                                if 'temperature' in payload:
-                                                    patch_data["temperature"] = payload["temperature"]
-                                                if 'feedOutput' in payload:
-                                                    patch_data["feedOutput"] = payload["feedOutput"]
-                                                if 'compostOutput' in payload:
-                                                    patch_data["compostOutput"] = payload["compostOutput"]
-                                                if 'feedStatus' in payload:
-                                                    patch_data["feedStatus"] = payload["feedStatus"]
-                                                if patch_data:
-                                                    async with session.patch(patch_url, json=patch_data) as patch_resp:
-                                                        if patch_resp.status == 200:
-                                                            logger.info(f"Patched batch {batch_num} with {patch_data}")
-                                                        else:
-                                                            logger.warning(f"Failed to patch batch: status {patch_resp.status}")
+                                patch_url = f"{server_url}/batches/{batch_num}"
+                                patch_data = {}
+                                if 'humidity' in payload:
+                                    patch_data["humidity"] = payload["humidity"]
+                                if 'temperature' in payload:
+                                    patch_data["temperature"] = payload["temperature"]
+                                if 'feedOutput' in payload:
+                                    patch_data["feedOutput"] = payload["feedOutput"]
+                                if 'compostOutput' in payload:
+                                    patch_data["compostOutput"] = payload["compostOutput"]
+                                if 'feedStatus' in payload:
+                                    patch_data["feedStatus"] = payload["feedStatus"]
+                                if patch_data:
+                                    async with session.patch(patch_url, json=patch_data, timeout=10) as patch_resp:
+                                        if patch_resp.status == 200:
+                                            _set_last_batch_number(machine_id, batch_num)
+                                            logger.info(f"Patched batch {batch_num} with {patch_data}")
+                                        else:
+                                            text = await patch_resp.text()
+                                            logger.warning(f"Failed to patch batch {batch_num}: {patch_resp.status} {text}")
                         except Exception as e:
                             logger.error(f"Failed to patch latest batch: {e}", exc_info=True)
                     asyncio.run_coroutine_threadsafe(patch_latest_batch(), loop)
@@ -570,31 +598,17 @@ def main():
                 batch_states = on_esp32_control.batch_states
 
                 if command == 'start':
-                    if batch_number:
-                        machine_status = 'active'
-                        state = batch_states.get(batch_number, {})
-                        if state.get('status') == 'active' and not state.get('finished'):
-                            logger.info(f"Continuing unfinished activity for batch {batch_number} (already running)")
-                            # Already running, skip re-initialization
-                            return
-                        elif state.get('status') == 'idle' and not state.get('finished'):
-                            logger.info(f"Resuming idle batch {batch_number}, continuing process")
-                            batch_states[batch_number]['status'] = 'active'
-                            batch_states[batch_number]['in_progress'] = True
-                            # Continue process (do not re-initialize)
-                            return
-                        # Otherwise, mark as in progress and start new
-                        batch_states[batch_number] = {'in_progress': True, 'finished': False, 'status': 'active'}
-                        # Also call backend logic for batch_number
-                        asyncio.run_coroutine_threadsafe(
-                            resume_or_create_batch(batch_number, server_url), loop
-                        )
-                    else:
-                        # No batch number: always resume or create latest batch for this machine
-                        logger.info("No batchNumber provided in ESP32 message for start. Will resume or create latest batch.")
-                        asyncio.run_coroutine_threadsafe(
-                            resume_or_create_latest_batch(server_url, machine_id), loop
-                        )
+                    async def handle_start():
+                        # Prefer tokenless device control endpoint to create/resume and return batchNumber.
+                        data = await _post_device_control('start', machine_id, server_url)
+                        server_batch = (data or {}).get('batchNumber')
+                        final_batch = server_batch or batch_number
+                        if final_batch:
+                            _set_last_batch_number(machine_id, final_batch)
+                            logger.info(f"Start resolved batchNumber={final_batch}")
+                        else:
+                            logger.warning("Start sent but no batchNumber available")
+                    asyncio.run_coroutine_threadsafe(handle_start(), loop)
                 elif command == 'stop' and batch_number:
                     # Mark batch as idle (not finished, can be resumed)
                     if batch_number in batch_states:
@@ -614,18 +628,20 @@ def main():
                 if command in ('start', 'stop', 'sorting', 'grinding', 'dehydration', 'feed_completed'):
                     # batch_number already set above
                     if command == 'sorting':
-                        logger.info(f"Sorting command received from ESP32 for batch {batch_number}. Sending POST to server.")
-                        if batch_number:
-                            asyncio.run_coroutine_threadsafe(
-                                post_stage_to_server('POST', command, batch_number, server_url), loop
-                            )
-                        else:
-                            logger.warning("No batchNumber provided in ESP32 message for sorting.")
+                        async def handle_sorting():
+                            # Ensure we have a batchNumber (cached latest or create/resume on demand)
+                            resolved = await _ensure_latest_batch_number(server_url, machine_id, hint_batch_number=batch_number)
+                            if not resolved:
+                                logger.error("Sorting received but cannot resolve batchNumber")
+                                return
+                            logger.info(f"Sorting received; using latest batch {resolved}. Posting to server now.")
+                            await post_stage_update('sorting', resolved, server_url, machine_id)
+                        asyncio.run_coroutine_threadsafe(handle_sorting(), loop)
                     elif command in ('grinding', 'dehydration', 'feed_completed'):
                         logger.info(f"{command.capitalize()} command received from ESP32 for batch {batch_number}. Sending PATCH to server.")
                         if batch_number:
                             asyncio.run_coroutine_threadsafe(
-                                post_stage_to_server('PATCH', command, batch_number, server_url), loop
+                                post_stage_update(command, batch_number, server_url, machine_id), loop
                             )
                         else:
                             logger.warning(f"No batchNumber provided in ESP32 message for {command}.")
@@ -640,34 +656,28 @@ def main():
                                 patch_batch_status(batch_number, 'idle', server_url), loop
                             )
                         else:
-                            logger.info("No batchNumber provided in ESP32 message for stop. Will stop latest batch.")
-                            # Find and stop the latest batch for this machine
-                            async def stop_latest_batch():
-                                try:
-                                    url = f"{server_url}/batches?machineId={machine_id}&limit=1&order=desc"
-                                    async with ClientSession() as session:
-                                        async with session.get(url) as resp:
-                                            if resp.status == 200:
-                                                batches = await resp.json()
-                                                if batches and isinstance(batches, list):
-                                                    batch = batches[0]
-                                                    batch_num = batch.get('batchNumber')
-                                                    if batch_num and batch.get('status') != 'completed':
-                                                        logger.info(f"Stopping latest batch {batch_num} (set to idle)")
-                                                        await patch_batch_status(batch_num, 'idle', server_url)
-                                                    else:
-                                                        logger.info("No active batch to stop.")
-                                                else:
-                                                    logger.info("No batch found to stop.")
-                                            else:
-                                                logger.warning(f"Failed to fetch latest batch for stop: status {resp.status}")
-                                except Exception as e:
-                                    logger.error(f"Failed to stop latest batch: {e}", exc_info=True)
-                            asyncio.run_coroutine_threadsafe(stop_latest_batch(), loop)
+                            logger.info("No batchNumber provided in ESP32 message for stop. Will stop cached latest batch.")
+                            async def stop_cached_batch():
+                                cached = _get_last_batch_number(machine_id)
+                                if not cached:
+                                    logger.warning("No cached batch to stop.")
+                                    return
+                                await patch_batch_status(cached, 'idle', server_url)
+                            asyncio.run_coroutine_threadsafe(stop_cached_batch(), loop)
                 else:
                     logger.warning(f"Unknown command from ESP32: {command}")
             except Exception as e:
                 logger.error(f"Error processing ESP32 control message: {e}", exc_info=True)
+
+        async def post_stage_update(stage: str, batch_number: str, server_url: str, machine_id: str):
+            """Best-effort stage update: try device control endpoint first, then legacy batch routes."""
+            # 1) Prefer tokenless device control endpoint if backend supports stage actions.
+            data = await _post_device_control(stage, machine_id, server_url, batch_number=batch_number)
+            if data is not None:
+                return
+
+            # 2) Legacy: /batches/{batch}/process (may not exist) then fallback to PATCH /batches/{batch}.
+            await post_stage_to_server('POST' if stage == 'sorting' else 'PATCH', stage, batch_number, server_url)
 
         async def post_stage_to_server(method: str, stage: str, batch_number: str, server_url: str):
             """
@@ -684,14 +694,30 @@ def main():
                             if response.status >= 400:
                                 text = await response.text()
                                 logger.error(f"Server error response: {text}")
+                                # fallback: patch the batch itself (some deployments don't have /process)
+                                await _patch_batch_feed_status(session, server_url, batch_number, stage)
                     elif method == 'PATCH':
                         async with session.patch(endpoint, json=payload, timeout=10) as response:
                             logger.info(f"Server PATCH {endpoint} status: {response.status}")
                             if response.status >= 400:
                                 text = await response.text()
                                 logger.error(f"Server error response: {text}")
+                                await _patch_batch_feed_status(session, server_url, batch_number, stage)
             except Exception as e:
                 logger.error(f"Failed to post stage to server: {e}", exc_info=True)
+
+
+        async def _patch_batch_feed_status(session: ClientSession, server_url: str, batch_number: str, stage: str):
+            patch_url = f"{server_url}/batches/{batch_number}"
+            patch_payload = {"feedStatus": stage}
+            try:
+                async with session.patch(patch_url, json=patch_payload, timeout=10) as patch_resp:
+                    logger.info(f"Fallback PATCH {patch_url} status: {patch_resp.status}")
+                    if patch_resp.status >= 400:
+                        text = await patch_resp.text()
+                        logger.error(f"Fallback PATCH error response: {text}")
+            except Exception as e:
+                logger.error(f"Fallback PATCH failed: {e}", exc_info=True)
 
 
         if mqtt_broker:
@@ -834,14 +860,17 @@ def main():
                         data = await response.json()
                         batch_number = data.get('batchNumber')
                         if batch_number:
+                            _set_last_batch_number(machine_id, batch_number)
                             logger.info(f"Batch {batch_number} created on server for machine {machine_id}")
-                        else:
-                            logger.info(f"{command.capitalize()} command sent to server successfully")
-                    else:
-                        text = await response.text()
-                        logger.error(f"Server returned error {response.status}: {text}")
+                            return batch_number
+                        logger.info(f"{command.capitalize()} command sent to server successfully")
+                        return None
+                    text = await response.text()
+                    logger.error(f"Server returned error {response.status}: {text}")
+                    return None
         except Exception as e:
             logger.error(f"Failed to post {command} to server: {e}", exc_info=True)
+            return None
 
 
     parser = argparse.ArgumentParser(description="WebRTC YOLO streaming server")
