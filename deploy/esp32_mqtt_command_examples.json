@@ -1,0 +1,44 @@
+{
+  "topic": "nutricycle/esp32/control",
+  "notes": [
+    "Send these JSON payloads to the MQTT topic above.",
+    "batchNumber is optional for sorting_*; the Pi will auto-use the latest cached batch or create one via device start.",
+    "completion is an alias of feed_completed."
+  ],
+  "commands": {
+    "start": {
+      "command": "start"
+    },
+    "stop": {
+      "command": "stop"
+    },
+    "sorting_compost": {
+      "command": "sorting_compost"
+    },
+    "sorting_animal_feed": {
+      "command": "sorting_animal_feed"
+    },
+    "dehydration": {
+      "command": "dehydration",
+      "batchNumber": "BATCH002"
+    },
+    "completion": {
+      "command": "completion",
+      "batchNumber": "BATCH002"
+    },
+    "feed_completed": {
+      "command": "feed_completed",
+      "batchNumber": "BATCH002"
+    }
+  },
+  "telemetry_examples": {
+    "humidity_temperature": {
+      "humidity": 62.5,
+      "temperature": 45.2
+    },
+    "outputs": {
+      "feedOutput": 1,
+      "compostOutput": 0
+    }
+  }
+}

@@ -570,6 +570,9 @@ def main():
             try:
                 payload = json.loads(message.payload.decode())
                 command = payload.get('command')
+                # Aliases and more specific stage names
+                if command == 'completion':
+                    command = 'feed_completed'
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
                 # --- PATCH humidity/temperature/feedOutput/compostOutput/feedStatus to last-known batch if present ---
@@ -640,17 +643,17 @@ def main():
                         batch_states[batch_number]['status'] = 'finished'
 
                 # --- ORIGINAL LOGIC ---
-                if command in ('start', 'stop', 'sorting', 'grinding', 'dehydration', 'feed_completed'):
+                if command in ('start', 'stop', 'sorting', 'sorting_compost', 'sorting_animal_feed', 'grinding', 'dehydration', 'feed_completed'):
                     # batch_number already set above
-                    if command == 'sorting':
+                    if command in ('sorting', 'sorting_compost', 'sorting_animal_feed'):
                         async def handle_sorting():
                             # Ensure we have a batchNumber (cached latest or create/resume on demand)
                             resolved = await _ensure_latest_batch_number(server_url, machine_id, hint_batch_number=batch_number)
                             if not resolved:
                                 logger.error("Sorting received but cannot resolve batchNumber")
                                 return
-                            logger.info(f"Sorting received; using latest batch {resolved}. Posting to server now.")
-                            await post_stage_update('sorting', resolved, server_url, machine_id)
+                            logger.info(f"{command} received; using latest batch {resolved}. Posting to server now.")
+                            await post_stage_update(command, resolved, server_url, machine_id)
                         asyncio.run_coroutine_threadsafe(handle_sorting(), loop)
                     elif command in ('grinding', 'dehydration', 'feed_completed'):
                         logger.info(f"{command.capitalize()} command received from ESP32 for batch {batch_number}. Sending PATCH to server.")
