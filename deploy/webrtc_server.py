@@ -579,9 +579,15 @@ def main():
                 if any(k in payload for k in ('humidity', 'temperature', 'feedOutput', 'compostOutput', 'feedStatus')):
                     async def patch_latest_batch():
                         try:
-                            batch_num = payload.get('batchNumber') or _get_last_batch_number(machine_id)
+                            # Same behavior as sorting/dehydration: if ESP32 doesn't send batchNumber,
+                            # use the latest cached batchNumber; if none exists yet, create one via start.
+                            batch_num = await _ensure_latest_batch_number(
+                                server_url,
+                                machine_id,
+                                hint_batch_number=payload.get('batchNumber')
+                            )
                             if not batch_num:
-                                logger.warning("No cached batchNumber for sensor patch; skipping.")
+                                logger.warning("No batchNumber available for sensor patch; skipping.")
                                 return
                             async with ClientSession() as session:
                                 headers = {"x-machine-id": machine_id} if machine_id else None
@@ -656,13 +662,15 @@ def main():
                             await post_stage_update(command, resolved, server_url, machine_id)
                         asyncio.run_coroutine_threadsafe(handle_sorting(), loop)
                     elif command in ('grinding', 'dehydration', 'feed_completed'):
-                        logger.info(f"{command.capitalize()} command received from ESP32 for batch {batch_number}. Sending PATCH to server.")
-                        if batch_number:
-                            asyncio.run_coroutine_threadsafe(
-                                post_stage_update(command, batch_number, server_url, machine_id), loop
-                            )
-                        else:
-                            logger.warning(f"No batchNumber provided in ESP32 message for {command}.")
+                        async def handle_stage_patch():
+                            resolved = await _ensure_latest_batch_number(server_url, machine_id, hint_batch_number=batch_number)
+                            if not resolved:
+                                logger.error(f"{command} received but cannot resolve batchNumber")
+                                return
+                            logger.info(f"{command} received; using latest batch {resolved}. Posting to server now.")
+                            await post_stage_update(command, resolved, server_url, machine_id)
+
+                        asyncio.run_coroutine_threadsafe(handle_stage_patch(), loop)
                     elif command == 'start':
                         # Already handled above
                         pass

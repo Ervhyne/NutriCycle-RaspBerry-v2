@@ -19,19 +19,20 @@
       "command": "sorting_animal_feed"
     },
     "dehydration": {
-      "command": "dehydration",
-      "batchNumber": "BATCH002"
+      "command": "dehydration"
     },
     "completion": {
-      "command": "completion",
-      "batchNumber": "BATCH002"
+      "command": "completion"
     },
     "feed_completed": {
-      "command": "feed_completed",
-      "batchNumber": "BATCH002"
+      "command": "feed_completed"
     }
   },
   "telemetry_examples": {
+    "latest_batch_humidity_temperature": {
+      "humidity": 62.5,
+      "temperature": 45.2
+    },
     "humidity_temperature": {
       "humidity": 62.5,
       "temperature": 45.2
