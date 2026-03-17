@@ -117,10 +117,12 @@ class SharedCamera:
             logger.error(f"Failed to open camera/video source: {source}")
             raise RuntimeError(f"Cannot open camera: {source}")
         
-        # Set capture resolution per --imgsz for faster processing on ONNX/CPU
-        desired_size = getattr(args, 'imgsz', 320)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, desired_size)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, desired_size)
+        # Capture resolution is independent from inference imgsz.
+        # This keeps stream quality high while still running lighter inference.
+        desired_width = int(getattr(args, 'capture_width', 640))
+        desired_height = int(getattr(args, 'capture_height', 480))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, desired_width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, desired_height)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
         
         # Get actual camera properties
@@ -906,6 +908,8 @@ def main():
     parser.add_argument("--flip", choices=['none', 'vertical', 'horizontal', '180'], default='none',
                         help="Flip video: vertical=upside-down, horizontal, 180=rotate 180")
     parser.add_argument("--imgsz", type=int, default=320, help="Inference image size (pixels)")
+    parser.add_argument("--capture-width", type=int, default=640, help="Camera capture width (stream clarity)")
+    parser.add_argument("--capture-height", type=int, default=480, help="Camera capture height (stream clarity)")
     parser.add_argument("--host", default="0.0.0.0", help="Server host")
     parser.add_argument("--port", type=int, default=8080, help="Server port")
     parser.add_argument("--announce-server", default=None, help="HTTP endpoint to POST machine_id + video URL")
