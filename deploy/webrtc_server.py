@@ -99,82 +99,6 @@ def _url_variants(server_url: str, path: str) -> list[str]:
     return [f"{base}{p}", f"{base}/api{p}"]
 
 
-def _resolve_inference_imgsz(model_instance, model_path: str, requested_imgsz: int) -> int:
-    """Resolve a safe inference size, including ONNX fixed-input fallbacks."""
-    imgsz = max(32, int(requested_imgsz))
-    if imgsz % 32 != 0:
-        # YOLO models generally expect stride-aligned sizes.
-        aligned = ((imgsz + 31) // 32) * 32
-        logger.warning(f"imgsz={imgsz} is not stride-aligned; using {aligned} instead")
-        imgsz = aligned
-
-    if not model_path.lower().endswith('.onnx'):
-        return imgsz
-
-    # Prefer authoritative ONNX input metadata from the model file itself.
-    try:
-        import onnxruntime as ort
-        ort_session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-        ort_shape = ort_session.get_inputs()[0].shape  # usually [N, C, H, W]
-        h = ort_shape[2] if len(ort_shape) > 2 else None
-        w = ort_shape[3] if len(ort_shape) > 3 else None
-        fixed_hw = isinstance(h, int) and isinstance(w, int) and h > 0 and w > 0
-        if fixed_hw and h == w:
-            if imgsz != h:
-                logger.warning(
-                    f"ONNX file input is fixed at {h}x{w}; overriding requested imgsz={imgsz} to {h}."
-                )
-            return int(h)
-    except Exception as ort_shape_error:
-        logger.debug(f"Could not read ONNX file input shape via onnxruntime: {ort_shape_error}")
-
-    # Fallback: inspect Ultralytics backend metadata when available.
-    try:
-        backend = getattr(model_instance, 'model', None)
-        session = getattr(backend, 'session', None)
-        if session is not None:
-            input_shape = session.get_inputs()[0].shape  # usually [N, C, H, W]
-            h = input_shape[2] if len(input_shape) > 2 else None
-            w = input_shape[3] if len(input_shape) > 3 else None
-            fixed_hw = isinstance(h, int) and isinstance(w, int) and h > 0 and w > 0
-            if fixed_hw and h == w:
-                if imgsz != h:
-                    logger.warning(
-                        f"ONNX model has fixed input {h}x{w}; overriding requested imgsz={imgsz} to {h}."
-                    )
-                return int(h)
-    except Exception as shape_error:
-        logger.debug(f"Could not read ONNX input shape metadata: {shape_error}")
-
-    def _probe(size: int) -> None:
-        probe = np.zeros((size, size, 3), dtype=np.uint8)
-        model_instance(probe, conf=0.01, imgsz=size, verbose=False)
-
-    try:
-        _probe(imgsz)
-        logger.info(f"ONNX inference probe succeeded at imgsz={imgsz}")
-        return imgsz
-    except Exception as primary_error:
-        fallback = 640
-        if imgsz == fallback:
-            logger.error(f"ONNX probe failed at imgsz={imgsz}: {primary_error}")
-            raise
-
-        logger.warning(
-            f"ONNX model rejected imgsz={imgsz}. Falling back to imgsz={fallback}. "
-            "To run true 320 ONNX inference, re-export ONNX at 320 from the .pt model."
-        )
-        try:
-            _probe(fallback)
-            return fallback
-        except Exception as fallback_error:
-            logger.error(
-                f"ONNX probe failed for requested imgsz={imgsz} and fallback imgsz={fallback}: "
-                f"{fallback_error}"
-            )
-            raise
-
-
 class SharedCamera:
     """Singleton camera instance shared across all video tracks."""
     _instance = None
@@ -256,10 +180,10 @@ class YOLOVideoTrack(VideoStreamTrack):
         
         logger.info(f"🎬 Video track created for client")
     
-    def stop(self):
+    async def stop(self):
         """Release camera reference when track stops."""
-        super().stop()
-        asyncio.create_task(SharedCamera.release_instance())
+        await super().stop()
+        await SharedCamera.release_instance()
         
     async def recv(self):
         """Receive the next frame (with YOLO inference applied)."""
@@ -1038,8 +962,6 @@ def main():
     logger.info(f"Loading model: {model_path}")
     model = YOLO(model_path)
     logger.info(f"Model loaded. Classes: {model.names}")
-    args.imgsz = _resolve_inference_imgsz(model, model_path, args.imgsz)
-    logger.info(f"Inference image size set to {args.imgsz}")
     
     # Test camera access before starting server
     logger.info(f"Testing camera access: {args.source}")
