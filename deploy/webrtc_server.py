@@ -577,8 +577,8 @@ def main():
                     command = 'feed_completed'
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
-                # --- PATCH humidity/temperature/feedOutput/compostOutput/feedStatus to last-known batch if present ---
-                if any(k in payload for k in ('humidity', 'temperature', 'feedOutput', 'compostOutput', 'feedStatus')):
+                # --- PATCH telemetry/feed fields (including estimatedWeight) to last-known batch if present ---
+                if any(k in payload for k in ('humidity', 'temperature', 'feedOutput', 'compostOutput', 'feedStatus', 'estimatedWeight')):
                     async def patch_latest_batch():
                         try:
                             # Same behavior as sorting/dehydration: if ESP32 doesn't send batchNumber,
@@ -604,6 +604,8 @@ def main():
                                     patch_data["compostOutput"] = payload["compostOutput"]
                                 if 'feedStatus' in payload:
                                     patch_data["feedStatus"] = payload["feedStatus"]
+                                if 'estimatedWeight' in payload:
+                                    patch_data["estimatedWeight"] = payload["estimatedWeight"]
                                 if patch_data:
                                     for patch_url in _url_variants(server_url, f"batches/{batch_num}"):
                                         async with session.patch(patch_url, json=patch_data, headers=headers, timeout=10) as patch_resp:
@@ -632,6 +634,15 @@ def main():
                         if final_batch:
                             _set_last_batch_number(machine_id, final_batch)
                             logger.info(f"Start resolved batchNumber={final_batch}")
+
+                            # If start payload includes estimatedWeight, patch it immediately to the resolved batch.
+                            if 'estimatedWeight' in payload:
+                                await patch_batch_fields(
+                                    final_batch,
+                                    {"estimatedWeight": payload["estimatedWeight"]},
+                                    server_url,
+                                    machine_id,
+                                )
                         else:
                             logger.warning("Start sent but no batchNumber available")
                     asyncio.run_coroutine_threadsafe(handle_start(), loop)
@@ -706,6 +717,21 @@ def main():
             So we patch the batch directly with feedStatus using x-machine-id header.
             """
             await patch_batch_feed_status(server_url, batch_number, stage, machine_id)
+
+
+        async def patch_batch_fields(batch_number: str, fields: dict, server_url: str, machine_id: str | None):
+            """Patch arbitrary batch fields via /batches/{batchNumber}."""
+            if not fields:
+                return
+            headers = {"x-machine-id": machine_id} if machine_id else None
+            async with ClientSession() as session:
+                for patch_url in _url_variants(server_url, f"batches/{batch_number}"):
+                    async with session.patch(patch_url, json=fields, headers=headers, timeout=10) as resp:
+                        logger.info(f"Field PATCH {patch_url} status: {resp.status}")
+                        if resp.status < 400:
+                            return
+                        text = await resp.text()
+                        logger.error(f"Field PATCH error response: {text}")
 
 
         async def patch_batch_feed_status(server_url: str, batch_number: str, stage: str, machine_id: str | None):

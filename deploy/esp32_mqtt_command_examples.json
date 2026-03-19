@@ -3,11 +3,13 @@
   "notes": [
     "Send these JSON payloads to the MQTT topic above.",
     "batchNumber is optional for sorting_*; the Pi will auto-use the latest cached batch or create one via device start.",
-    "completion is an alias of feed_completed."
+    "completion is an alias of feed_completed.",
+    "estimatedWeight can be sent on start (or as telemetry) and will be patched to the latest/resolved batch."
   ],
   "commands": {
     "start": {
-      "command": "start"
+      "command": "start",
+      "estimatedWeight": 2.5
     },
     "stop": {
       "command": "stop"
@@ -29,6 +31,9 @@
     }
   },
   "telemetry_examples": {
+    "latest_batch_estimated_weight": {
+      "estimatedWeight": 2.5
+    },
     "latest_batch_humidity_temperature": {
       "humidity": 62.5,
       "temperature": 45.2
