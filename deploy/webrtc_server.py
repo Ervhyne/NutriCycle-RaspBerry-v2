@@ -31,10 +31,18 @@ logger = logging.getLogger(__name__)
 args = None
 model = None
 shared_camera = None  # Singleton camera instance
+model_is_onnx = False
 
 # Event queue for detection events
 from asyncio import Queue
 event_queue: Queue = Queue(maxsize=32)  # non-blocking if full
+
+# Global detection state gate to avoid per-frame spam.
+# False means currently clear/no trigger, True means trigger active.
+last_has_detection = False
+detection_state_lock = asyncio.Lock()
+detection_on_streak = 0
+detection_off_streak = 0
 
 # In-memory latest annotated frame (JPEG bytes) for instant preview
 latest_frame_jpeg = None
@@ -97,6 +105,165 @@ def _url_variants(server_url: str, path: str) -> list[str]:
     if base.endswith("/api"):
         return [f"{base}{p}", f"{base[:-4]}{p}"]
     return [f"{base}{p}", f"{base}/api{p}"]
+
+
+async def _enqueue_detection_state_if_changed(
+    dets: list,
+    width: int,
+    height: int,
+    frame_id: int | None,
+    queue: Queue | None,
+) -> None:
+    """Emit one event only when trigger state changes (0->1 or 1->0)."""
+    global last_has_detection, detection_on_streak, detection_off_streak
+
+    if queue is None:
+        return
+
+    trigger_dets = _filter_trigger_detections(dets, width, height)
+    has_detection = bool(trigger_dets)
+    stable_frames = (
+        max(1, int(getattr(args, 'trigger_stable_frames', 3)))
+        if getattr(args, 'line_trigger_enabled', False)
+        else 1
+    )
+
+    async with detection_state_lock:
+        if has_detection:
+            detection_on_streak += 1
+            detection_off_streak = 0
+        else:
+            detection_off_streak += 1
+            detection_on_streak = 0
+
+        if not last_has_detection and has_detection and detection_on_streak >= stable_frames:
+            last_has_detection = True
+        elif last_has_detection and (not has_detection) and detection_off_streak >= stable_frames:
+            last_has_detection = False
+        else:
+            return
+
+        state_now = last_has_detection
+
+    event = {
+        'timestamp': time.time(),
+        'frame_id': frame_id,
+        'width': width,
+        'height': height,
+        'detections': trigger_dets if state_now else [],
+        'count': len(trigger_dets) if state_now else 0,
+        'has_detection': state_now,
+        'line_trigger_enabled': bool(getattr(args, 'line_trigger_enabled', False)),
+        'machine_id': getattr(args, 'machine_id', None)
+    }
+    try:
+        queue.put_nowait(event)
+    except Exception:
+        # queue full, drop event to avoid blocking
+        pass
+
+
+def _run_model_inference(frame, conf_threshold: float, imgsz: int):
+    """Run inference with safe sizing behavior for fixed-shape ONNX exports."""
+    if model_is_onnx:
+        # Many ONNX exports are fixed-size (commonly 640x640).
+        # Let Ultralytics use model-native sizing instead of forcing --imgsz.
+        return model(frame, conf=conf_threshold, verbose=False)
+    return model(frame, conf=conf_threshold, imgsz=imgsz, verbose=False)
+
+
+def _normalize_xyxy(xyxy) -> list[float] | None:
+    """Normalize YOLO bbox output into [x1, y1, x2, y2]."""
+    try:
+        if xyxy is None:
+            return None
+        # Common Ultralytics shape is [[x1, y1, x2, y2]]
+        if isinstance(xyxy, list) and len(xyxy) == 1 and isinstance(xyxy[0], list):
+            xyxy = xyxy[0]
+        if not isinstance(xyxy, list) or len(xyxy) < 4:
+            return None
+        return [float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])]
+    except Exception:
+        return None
+
+
+def _filter_trigger_detections(dets: list, width: int, height: int) -> list:
+    """Return detections that are considered trigger-active under current mode."""
+    if not getattr(args, 'line_trigger_enabled', False):
+        return dets
+
+    if width <= 0 or height <= 0:
+        return []
+
+    trigger_line_y = float(getattr(args, 'trigger_line_y', 0.55))
+    trigger_line_y = max(0.0, min(1.0, trigger_line_y))
+    line_y_px = trigger_line_y * float(height)
+    side = getattr(args, 'after_line_side', 'top')
+    cls_filter = getattr(args, 'trigger_class', None)
+    min_conf = getattr(args, 'trigger_min_conf', None)
+    if min_conf is None:
+        min_conf = float(getattr(args, 'conf', 0.5))
+
+    filtered = []
+    for d in dets:
+        try:
+            conf = float(d.get('conf', 0.0))
+            cls_id = int(d.get('cls', -1))
+            xyxy = _normalize_xyxy(d.get('xyxy'))
+            if conf < min_conf:
+                continue
+            if cls_filter is not None and cls_id != int(cls_filter):
+                continue
+            if xyxy is None:
+                continue
+            y_center = (float(xyxy[1]) + float(xyxy[3])) / 2.0
+            in_after_line = y_center <= line_y_px if side == 'top' else y_center >= line_y_px
+            if in_after_line:
+                filtered.append(d)
+        except Exception:
+            continue
+
+    return filtered
+
+
+def _draw_trigger_overlay(frame_bgr, dets: list | None = None) -> None:
+    """Draw horizontal trigger line and status label on the annotated frame."""
+    if not getattr(args, 'line_trigger_enabled', False):
+        return
+    if frame_bgr is None or not hasattr(frame_bgr, 'shape'):
+        return
+
+    h, w = frame_bgr.shape[:2]
+    if h <= 0 or w <= 0:
+        return
+
+    trigger_line_y = float(getattr(args, 'trigger_line_y', 0.55))
+    trigger_line_y = max(0.0, min(1.0, trigger_line_y))
+    y = int(trigger_line_y * h)
+
+    active = False
+    if dets is not None:
+        try:
+            active = bool(_filter_trigger_detections(dets, w, h))
+        except Exception:
+            active = False
+
+    # Green when clear, red when trigger zone occupied.
+    color = (0, 0, 255) if active else (0, 255, 0)
+    cv2.line(frame_bgr, (0, y), (w - 1, y), color, 2)
+
+    side = getattr(args, 'after_line_side', 'top')
+    label = f"TRIGGER LINE y={trigger_line_y:.2f} side={side} {'ACTIVE' if active else 'CLEAR'}"
+    label_y = y - 8 if y > 24 else y + 20
+    cv2.putText(
+        frame_bgr,
+        label,
+        (10, label_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        color,
+        2,
+    )
 
 
 class SharedCamera:
@@ -182,10 +349,15 @@ class YOLOVideoTrack(VideoStreamTrack):
         
         logger.info(f"🎬 Video track created for client")
     
-    async def stop(self):
+    def stop(self):
         """Release camera reference when track stops."""
-        await super().stop()
-        await SharedCamera.release_instance()
+        super().stop()
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(SharedCamera.release_instance())
+        except RuntimeError:
+            # No running loop; release synchronously as best effort.
+            asyncio.run(SharedCamera.release_instance())
         
     async def recv(self):
         """Receive the next frame (with YOLO inference applied)."""
@@ -212,7 +384,7 @@ class YOLOVideoTrack(VideoStreamTrack):
             
             # Run YOLO inference
             t0 = time.time()
-            results = self.model(frame, conf=self.conf, imgsz=self.imgsz, verbose=False)
+            results = _run_model_inference(frame, conf_threshold=self.conf, imgsz=self.imgsz)
             annotated = results[0].plot()
             inference_time = time.time() - t0
 
@@ -229,7 +401,7 @@ class YOLOVideoTrack(VideoStreamTrack):
             dets = []
             for b in results[0].boxes:
                 try:
-                    xyxy = b.xyxy.tolist() if hasattr(b, 'xyxy') else None
+                    xyxy = _normalize_xyxy(b.xyxy.tolist() if hasattr(b, 'xyxy') else None)
                     dets.append({
                         'cls': int(b.cls),
                         'name': self.model.names[int(b.cls)] if hasattr(self.model, 'names') else str(int(b.cls)),
@@ -239,21 +411,16 @@ class YOLOVideoTrack(VideoStreamTrack):
                 except Exception:
                     continue
 
-            # If there are detections, enqueue an event (non-blocking)
-            if dets and self.event_queue is not None:
-                event = {
-                    'timestamp': time.time(),
-                    'frame_id': self.frame_count,
-                    'width': self.width,
-                    'height': self.height,
-                    'detections': dets,
-                    'machine_id': getattr(args, 'machine_id', None)
-                }
-                try:
-                    self.event_queue.put_nowait(event)
-                except Exception:
-                    # queue full, drop event to avoid blocking
-                    pass
+            _draw_trigger_overlay(annotated, dets)
+
+            # Emit detection updates only on state transitions (no spam per frame).
+            await _enqueue_detection_state_if_changed(
+                dets=dets,
+                width=self.width,
+                height=self.height,
+                frame_id=self.frame_count,
+                queue=self.event_queue,
+            )
             
             # Add FPS overlay
             self.fps_counter += 1
@@ -392,7 +559,7 @@ async def on_shutdown(app):
 
 
 def main():
-    global args, model
+    global args, model, model_is_onnx
 
     # MQTT client (optional)
     mqtt_client = None
@@ -803,12 +970,22 @@ def main():
             if mqtt_client:
                 try:
                     mqtt_client.publish(mqtt_topic, msg, qos=mqtt_qos)
-                    # If we want to signal ESP32 directly on detection, publish a compact alert topic
-                    mqtt_client.publish(mqtt_esp_topic, json.dumps({'machine_id': evt.get('machine_id'), 'alert': True}), qos=1)
+                    # Publish compact state to ESP32: 1 when detected, 0 when clear.
+                    mqtt_client.publish(
+                        mqtt_esp_topic,
+                        json.dumps({
+                            'machine_id': evt.get('machine_id'),
+                            'alert': 1 if evt.get('has_detection') else 0,
+                        }),
+                        qos=1,
+                    )
                 except Exception as e:
                     logger.warning(f"MQTT publish failed: {e}")
-            # Also log to server console
-            logger.info(f"Detection event: {len(evt.get('detections', []))} objects from {evt.get('machine_id')}")
+            # Log one line per transition only.
+            logger.info(
+                f"Detection state: {'1 (detected)' if evt.get('has_detection') else '0 (clear)'} "
+                f"machine={evt.get('machine_id')} line_mode={evt.get('line_trigger_enabled')}"
+            )
 
     # will register these tasks later on app startup
 
@@ -837,7 +1014,7 @@ def main():
 
                 try:
                     t0 = time.time()
-                    results = model(frame, conf=args.conf, imgsz=args.imgsz, verbose=False)
+                    results = _run_model_inference(frame, conf_threshold=args.conf, imgsz=args.imgsz)
                     inference_time = time.time() - t0
 
                     annotated = results[0].plot()
@@ -854,7 +1031,7 @@ def main():
                     dets = []
                     for b in results[0].boxes:
                         try:
-                            xyxy = b.xyxy.tolist() if hasattr(b, 'xyxy') else None
+                            xyxy = _normalize_xyxy(b.xyxy.tolist() if hasattr(b, 'xyxy') else None)
                             dets.append({
                                 'cls': int(b.cls),
                                 'name': model.names[int(b.cls)] if hasattr(model, 'names') else str(int(b.cls)),
@@ -864,20 +1041,15 @@ def main():
                         except Exception:
                             continue
 
-                    if dets:
-                        event = {
-                            'timestamp': time.time(),
-                            'frame_id': None,
-                            'width': camera.width,
-                            'height': camera.height,
-                            'detections': dets,
-                            'machine_id': getattr(args, 'machine_id', None)
-                        }
-                        try:
-                            event_queue.put_nowait(event)
-                        except Exception:
-                            # drop if queue full
-                            pass
+                    _draw_trigger_overlay(annotated, dets)
+
+                    await _enqueue_detection_state_if_changed(
+                        dets=dets,
+                        width=camera.width,
+                        height=camera.height,
+                        frame_id=None,
+                        queue=event_queue,
+                    )
 
                     # throttle keepalive loop to configured FPS
                     await asyncio.sleep(interval)
@@ -947,6 +1119,18 @@ def main():
     parser.add_argument("--status-update-interval", type=int, default=60, help="Seconds between machine status updates to API")
     parser.add_argument("--persistent", action="store_true", help="Keep camera + inference running even when no clients are connected")
     parser.add_argument("--keepalive-fps", type=int, default=2, help="FPS to run background inference when persistent (default: 2)")
+    parser.add_argument("--line-trigger-enabled", action="store_true",
+                        help="Enable horizontal trigger line mode for ESP32 ON/OFF signaling")
+    parser.add_argument("--trigger-line-y", type=float, default=0.55,
+                        help="Horizontal trigger line Y position as normalized value (0.0 top to 1.0 bottom)")
+    parser.add_argument("--after-line-side", choices=['top', 'bottom'], default='top',
+                        help="Which side of the trigger line is considered active zone")
+    parser.add_argument("--trigger-stable-frames", type=int, default=3,
+                        help="Consecutive frames required before trigger state changes")
+    parser.add_argument("--trigger-min-conf", type=float, default=None,
+                        help="Min confidence for line trigger checks (defaults to --conf)")
+    parser.add_argument("--trigger-class", type=int, default=None,
+                        help="Optional class id filter for trigger checks")
     
     # MQTT options
     parser.add_argument("--mqtt-broker", default=None, help="MQTT broker host (optional)")
@@ -961,6 +1145,9 @@ def main():
     parser.add_argument("--server-url", default="http://localhost:4000", help="URL of NutriCycle server for batch creation")
 
     args = parser.parse_args()
+
+    # Clamp line position so bad values don't break trigger logic.
+    args.trigger_line_y = max(0.0, min(1.0, float(args.trigger_line_y)))
     
     # Parse source
     args.source = int(args.source) if args.source.isdigit() else args.source
@@ -991,7 +1178,20 @@ def main():
     
     logger.info(f"Loading model: {model_path}")
     model = YOLO(model_path)
+    model_is_onnx = model_path.lower().endswith('.onnx')
     logger.info(f"Model loaded. Classes: {model.names}")
+    if model_is_onnx:
+        logger.info("ONNX model detected: ignoring --imgsz at runtime to avoid fixed-shape mismatch")
+
+    if args.line_trigger_enabled:
+        trig_conf = args.trigger_min_conf if args.trigger_min_conf is not None else args.conf
+        logger.info(
+            f"Line trigger enabled: horizontal_y={args.trigger_line_y:.3f} "
+            f"after_side={args.after_line_side} stable_frames={args.trigger_stable_frames} "
+            f"min_conf={trig_conf} class_filter={args.trigger_class}"
+        )
+    else:
+        logger.info("Line trigger disabled: state changes use full-frame detections")
     
     # Test camera access before starting server
     logger.info(f"Testing camera access: {args.source}")
