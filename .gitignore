@@ -6,6 +6,5 @@
 __pycache__/
 *.pyc
 *.pyo
-.env
 
 /NutriCycle-Objects-Detection-v2.v2-v2-clean-balanced.yolov8
