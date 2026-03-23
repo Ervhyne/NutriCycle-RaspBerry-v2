@@ -55,6 +55,98 @@ STATE_FILE = Path(__file__).with_name("device_state.json")
 _last_batch_cache = {}
 
 
+def _parse_simple_env_file(env_file: Path) -> dict[str, str]:
+    """Parse a minimal .env file format (KEY=VALUE, optional quotes/comments)."""
+    parsed: dict[str, str] = {}
+    try:
+        raw = env_file.read_text(encoding="utf-8")
+    except Exception:
+        return parsed
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[7:].strip()
+        if "=" not in stripped:
+            continue
+
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if not key:
+            continue
+
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            value = value[1:-1]
+
+        parsed[key] = value
+
+    return parsed
+
+
+def _load_env_file_into_environ(env_file: Path) -> bool:
+    """Load env file values without overriding already-exported environment vars."""
+    if not env_file.exists():
+        return False
+
+    loaded = _parse_simple_env_file(env_file)
+    for key, value in loaded.items():
+        os.environ.setdefault(key, value)
+    return True
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        return default
+
+
+def _env_optional_float(name: str) -> float | None:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _env_optional_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
 def _load_device_state() -> dict:
     try:
         if STATE_FILE.exists():
@@ -1098,53 +1190,71 @@ def main():
             return None
 
 
-    parser = argparse.ArgumentParser(description="WebRTC YOLO streaming server")
-    parser.add_argument("--model", default="AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt",
+    bootstrap_parser = argparse.ArgumentParser(add_help=False)
+    bootstrap_parser.add_argument(
+        "--env-file",
+        default=str(Path(__file__).with_name(".env")),
+        help="Path to .env file for defaults (default: deploy/.env)",
+    )
+    bootstrap_args, remaining_argv = bootstrap_parser.parse_known_args()
+
+    env_file_path = Path(bootstrap_args.env_file)
+    if not env_file_path.is_absolute():
+        env_file_path = (Path.cwd() / env_file_path).resolve()
+
+    if _load_env_file_into_environ(env_file_path):
+        logger.info(f"Loaded env defaults from: {env_file_path}")
+    else:
+        logger.info(f"Env file not found at: {env_file_path} (using CLI/default values)")
+
+    parser = argparse.ArgumentParser(description="WebRTC YOLO streaming server", parents=[bootstrap_parser])
+    parser.add_argument("--model", default=os.environ.get("MODEL_PATH", "AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt"),
                         help="Path to YOLO model (.pt or .onnx)")
-    parser.add_argument("--source", default="0", help="Camera index or video file path")
-    parser.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
-    parser.add_argument("--flip", choices=['none', 'vertical', 'horizontal', '180'], default='none',
+    parser.add_argument("--source", default=os.environ.get("VIDEO_SOURCE", "0"), help="Camera index or video file path")
+    parser.add_argument("--conf", type=float, default=_env_float("CONFIDENCE", 0.5), help="Confidence threshold")
+    parser.add_argument("--flip", choices=['none', 'vertical', 'horizontal', '180'], default=os.environ.get("FLIP_MODE", "none"),
                         help="Flip video: vertical=upside-down, horizontal, 180=rotate 180")
-    parser.add_argument("--imgsz", type=int, default=320, help="Inference image size (pixels)")
-    parser.add_argument("--capture-width", type=int, default=640, help="Camera capture width (stream clarity)")
-    parser.add_argument("--capture-height", type=int, default=480, help="Camera capture height (stream clarity)")
-    parser.add_argument("--host", default="0.0.0.0", help="Server host")
-    parser.add_argument("--port", type=int, default=8080, help="Server port")
-    parser.add_argument("--announce-server", default=None, help="HTTP endpoint to POST machine_id + video URL")
-    parser.add_argument("--machine-id", default=None, help="Unique Machine ID for this device")
-    parser.add_argument("--announce-interval", type=int, default=60, help="Seconds between announce attempts")
-    parser.add_argument("--public-url", default=None, help="Public video URL if ngrok is used externally")
-    parser.add_argument("--api-base-url", default=None, help="NutriCycle API base URL (e.g. https://api.example.com) for status updates")
-    parser.add_argument("--machine-secret", default=None, help="Machine secret for authentication with NutriCycle API")
-    parser.add_argument("--status-update-interval", type=int, default=60, help="Seconds between machine status updates to API")
-    parser.add_argument("--persistent", action="store_true", help="Keep camera + inference running even when no clients are connected")
-    parser.add_argument("--keepalive-fps", type=int, default=2, help="FPS to run background inference when persistent (default: 2)")
+    parser.add_argument("--imgsz", type=int, default=_env_int("INFERENCE_IMGSZ", 320), help="Inference image size (pixels)")
+    parser.add_argument("--capture-width", type=int, default=_env_int("CAPTURE_WIDTH", 640), help="Camera capture width (stream clarity)")
+    parser.add_argument("--capture-height", type=int, default=_env_int("CAPTURE_HEIGHT", 480), help="Camera capture height (stream clarity)")
+    parser.add_argument("--host", default=os.environ.get("WEBRTC_HOST", "0.0.0.0"), help="Server host")
+    parser.add_argument("--port", type=int, default=_env_int("WEBRTC_PORT", 8080), help="Server port")
+    parser.add_argument("--announce-server", default=os.environ.get("ANNOUNCE_SERVER", None), help="HTTP endpoint to POST machine_id + video URL")
+    parser.add_argument("--machine-id", default=os.environ.get("MACHINE_ID", None), help="Unique Machine ID for this device")
+    parser.add_argument("--announce-interval", type=int, default=_env_int("ANNOUNCE_INTERVAL", 60), help="Seconds between announce attempts")
+    parser.add_argument("--public-url", default=os.environ.get("PUBLIC_URL", None), help="Public video URL if ngrok is used externally")
+    parser.add_argument("--api-base-url", default=os.environ.get("API_BASE_URL", None), help="NutriCycle API base URL (e.g. https://api.example.com) for status updates")
+    parser.add_argument("--machine-secret", default=os.environ.get("MACHINE_SECRET", None), help="Machine secret for authentication with NutriCycle API")
+    parser.add_argument("--status-update-interval", type=int, default=_env_int("STATUS_UPDATE_INTERVAL", 60), help="Seconds between machine status updates to API")
+    parser.add_argument("--persistent", action="store_true", default=_env_bool("PERSISTENT", False), help="Keep camera + inference running even when no clients are connected")
+    parser.add_argument("--keepalive-fps", type=int, default=_env_int("KEEPALIVE_FPS", 2), help="FPS to run background inference when persistent (default: 2)")
     parser.add_argument("--line-trigger-enabled", action="store_true",
+                        default=_env_bool("LINE_TRIGGER_ENABLED", False),
                         help="Enable horizontal trigger line mode for ESP32 ON/OFF signaling")
-    parser.add_argument("--trigger-line-y", type=float, default=0.55,
+    parser.add_argument("--trigger-line-y", type=float, default=_env_float("TRIGGER_LINE_Y", 0.55),
                         help="Horizontal trigger line Y position as normalized value (0.0 top to 1.0 bottom)")
-    parser.add_argument("--after-line-side", choices=['top', 'bottom'], default='top',
+    parser.add_argument("--after-line-side", choices=['top', 'bottom'], default=os.environ.get("AFTER_LINE_SIDE", 'top'),
                         help="Which side of the trigger line is considered active zone")
-    parser.add_argument("--trigger-stable-frames", type=int, default=3,
+    parser.add_argument("--trigger-stable-frames", type=int, default=_env_int("TRIGGER_STABLE_FRAMES", 3),
                         help="Consecutive frames required before trigger state changes")
-    parser.add_argument("--trigger-min-conf", type=float, default=None,
+    parser.add_argument("--trigger-min-conf", type=float, default=_env_optional_float("TRIGGER_MIN_CONF"),
                         help="Min confidence for line trigger checks (defaults to --conf)")
-    parser.add_argument("--trigger-class", type=int, default=None,
+    parser.add_argument("--trigger-class", type=int, default=_env_optional_int("TRIGGER_CLASS"),
                         help="Optional class id filter for trigger checks")
     
     # MQTT options
-    parser.add_argument("--mqtt-broker", default=None, help="MQTT broker host (optional)")
-    parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port")
-    parser.add_argument("--mqtt-topic", default="nutricycle/detections", help="MQTT topic for detection events")
-    parser.add_argument("--mqtt-esp-topic", default="nutricycle/esp32", help="MQTT topic to send compact alerts to ESP32")
-    parser.add_argument("--mqtt-control-topic", default="nutricycle/esp32/control", help="MQTT topic to receive start/stop commands from ESP32")
-    parser.add_argument("--mqtt-username", default=None, help="MQTT username")
-    parser.add_argument("--mqtt-password", default=None, help="MQTT password")
-    parser.add_argument("--mqtt-qos", type=int, default=1, help="MQTT QoS")
-    parser.add_argument("--control-token", default=None, help="Bearer token required for /control HTTP POSTs")
-    parser.add_argument("--server-url", default="http://localhost:4000", help="URL of NutriCycle server for batch creation")
+    parser.add_argument("--mqtt-broker", default=os.environ.get("MQTT_BROKER", None), help="MQTT broker host (optional)")
+    parser.add_argument("--mqtt-port", type=int, default=_env_int("MQTT_PORT", 1883), help="MQTT broker port")
+    parser.add_argument("--mqtt-topic", default=os.environ.get("MQTT_TOPIC", "nutricycle/detections"), help="MQTT topic for detection events")
+    parser.add_argument("--mqtt-esp-topic", default=os.environ.get("MQTT_ESP_TOPIC", "nutricycle/esp32"), help="MQTT topic to send compact alerts to ESP32")
+    parser.add_argument("--mqtt-control-topic", default=os.environ.get("MQTT_CONTROL_TOPIC", "nutricycle/esp32/control"), help="MQTT topic to receive start/stop commands from ESP32")
+    parser.add_argument("--mqtt-username", default=os.environ.get("MQTT_USERNAME", None), help="MQTT username")
+    parser.add_argument("--mqtt-password", default=os.environ.get("MQTT_PASSWORD", None), help="MQTT password")
+    parser.add_argument("--mqtt-qos", type=int, default=_env_int("MQTT_QOS", 1), help="MQTT QoS")
+    parser.add_argument("--control-token", default=os.environ.get("CONTROL_TOKEN", None), help="Bearer token required for /control HTTP POSTs")
+    parser.add_argument("--server-url", default=os.environ.get("SERVER_URL", "http://localhost:4000"), help="URL of NutriCycle server for batch creation")
 
-    args = parser.parse_args()
+    args = parser.parse_args(remaining_argv)
 
     # Clamp line position so bad values don't break trigger logic.
     args.trigger_line_y = max(0.0, min(1.0, float(args.trigger_line_y)))
