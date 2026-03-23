@@ -1466,7 +1466,7 @@ def main():
             if token != args.control_token:
                 return web.Response(status=403, text='Forbidden')
 
-        machine_id = data.get('machine_id')
+        machine_id = data.get('machine_id') or data.get('machineId')
         if machine_id != args.machine_id:
             return web.Response(status=404, text='Machine ID mismatch')
 
@@ -1474,25 +1474,14 @@ def main():
         if cmd not in ('stop', 'pause', 'reset', 'emergency_stop'):
             return web.Response(status=400, text='Invalid command')
 
-        # Publish to ESP32 via MQTT (best-effort)
-        mqtt_client = request.app.get('mqtt_client')
-        esp_topic_template = getattr(args, 'mqtt_esp_command_topic', 'nutricycle/esp32/{machineId}/command')
-        esp_topic = esp_topic_template.replace('{machineId}', machine_id)
-        payload = {'machine_id': machine_id, 'command': cmd, 'timestamp': time.time()}
+        logger.info(f"HTTP /control received command '{cmd}' for machine {machine_id}")
 
-        if mqtt_client:
-            try:
-                mqtt_client.publish(esp_topic, json.dumps(payload), qos=1)
-                logger.info(f"Forwarded control '{cmd}' to ESP32 via MQTT on topic {esp_topic}")
-            except Exception as e:
-                logger.warning(f"MQTT publish failed: {e}")
+        # Normalize stop-like commands so local and ESP32 behavior is consistent.
+        normalized_cmd = 'emergency_stop' if cmd in ('stop', 'emergency_stop') else cmd
 
-        else:
-            logger.warning('MQTT client not connected (control will still be applied locally)')
-
-        # Local control actions: stop/pause/reset/emergency_stop affect server-side keepalive (camera + inference)
+        # Local control actions: execute immediately via HTTP path before forwarding to ESP32.
         try:
-            if cmd in ('stop', 'emergency_stop'):
+            if normalized_cmd == 'emergency_stop':
                 t = request.app.get('camera_keepalive_task')
                 if t:
                     t.cancel()
@@ -1503,10 +1492,9 @@ def main():
                     request.app.pop('camera_keepalive_task', None)
                 # Ensure camera released
                 await SharedCamera.release_instance()
-                logger.info(f"Local keepalive stopped and camera released via /control ({cmd})")
-                return web.Response(status=200, text='Keepalive stopped and camera released')
+                logger.info(f"Local keepalive stopped and camera released via /control ({normalized_cmd})")
 
-            elif cmd == 'pause':
+            elif normalized_cmd == 'pause':
                 # stop keepalive but keep camera open for quicker resume
                 t = request.app.get('camera_keepalive_task')
                 if t:
@@ -1521,9 +1509,8 @@ def main():
                 except RuntimeError as e:
                     return web.Response(status=503, text=f'Failed to open camera: {e}')
                 logger.info('Local paused: camera open, inference stopped')
-                return web.Response(status=200, text='Paused (camera open, inference stopped)')
 
-            elif cmd == 'reset':
+            elif normalized_cmd == 'reset':
                 # restart keepalive
                 t = request.app.get('camera_keepalive_task')
                 if t:
@@ -1535,11 +1522,45 @@ def main():
                     request.app.pop('camera_keepalive_task', None)
                 request.app['camera_keepalive_task'] = asyncio.create_task(camera_keepalive(request.app))
                 logger.info('Local keepalive restarted via /control')
-                return web.Response(status=200, text='Keepalive restarted')
 
         except Exception as e:
-            logger.error(f'Error handling control {cmd}: {e}', exc_info=True)
+            logger.error(f'Error handling control {normalized_cmd}: {e}', exc_info=True)
             return web.Response(status=500, text=f'Control handling failed: {e}')
+
+        # Forward to ESP32 via MQTT after local action has been applied.
+        mqtt_client = request.app.get('mqtt_client')
+        esp_topic_template = getattr(args, 'mqtt_esp_command_topic', 'nutricycle/esp32/{machineId}/command')
+        esp_topic = esp_topic_template.replace('{machineId}', machine_id)
+        payload = {
+            'machine_id': machine_id,
+            'machineId': machine_id,
+            'command': normalized_cmd,
+            'timestamp': time.time(),
+            'source': 'http_control',
+        }
+
+        forwarded = False
+        dispatch_error = None
+        if mqtt_client:
+            try:
+                mqtt_client.publish(esp_topic, json.dumps(payload), qos=1)
+                forwarded = True
+                logger.info(f"Forwarded HTTP control '{normalized_cmd}' to ESP32 via MQTT on topic {esp_topic}")
+            except Exception as e:
+                dispatch_error = str(e)
+                logger.warning(f"MQTT publish failed: {e}")
+        else:
+            dispatch_error = 'MQTT client not connected'
+            logger.warning('MQTT client not connected (local stop applied, ESP32 forward unavailable)')
+
+        return web.json_response({
+            'success': True,
+            'machineId': machine_id,
+            'command': normalized_cmd,
+            'localApplied': True,
+            'esp32Forwarded': forwarded,
+            'dispatchError': dispatch_error,
+        })
 
     app.router.add_post('/control', control_handler)
 
