@@ -426,17 +426,35 @@ class SharedCamera:
             raise RuntimeError(f"Cannot open camera: {source}")
         
         # Capture resolution is independent from inference imgsz.
-        # This keeps stream quality high while still running lighter inference.
+        # Keep this low on Raspberry Pi to reduce end-to-end pipeline load.
         desired_width = int(getattr(args, 'capture_width', 640))
         desired_height = int(getattr(args, 'capture_height', 480))
+        self.desired_width = max(1, desired_width)
+        self.desired_height = max(1, desired_height)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, desired_width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, desired_height)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
         
         # Get actual camera properties
-        self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+        # Some USB cameras ignore requested CAP_PROP resolution.
+        # If that happens, force a software resize on every frame read.
+        self.force_resize = (
+            actual_width != self.desired_width or actual_height != self.desired_height
+        )
+        self.width = self.desired_width if self.force_resize else actual_width
+        self.height = self.desired_height if self.force_resize else actual_height
+        if self.force_resize:
+            logger.warning(
+                "Camera returned %sx%s instead of requested %sx%s; applying software resize fallback",
+                actual_width,
+                actual_height,
+                self.desired_width,
+                self.desired_height,
+            )
         
         logger.info(f"✅ Shared camera opened: {self.width}x{self.height} @ {self.fps}fps")
         self.ref_count = 0
@@ -465,7 +483,16 @@ class SharedCamera:
     
     def read(self):
         """Thread-safe camera read."""
-        return self.cap.read()
+        ret, frame = self.cap.read()
+        if not ret:
+            return ret, frame
+        if self.force_resize and frame is not None:
+            frame = cv2.resize(
+                frame,
+                (self.desired_width, self.desired_height),
+                interpolation=cv2.INTER_AREA,
+            )
+        return ret, frame
 
 
 class YOLOVideoTrack(VideoStreamTrack):
