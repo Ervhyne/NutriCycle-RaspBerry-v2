@@ -112,6 +112,14 @@ python3 webrtc_server.py \
 
 WEBRTC_PID=$!
 
+# Ensure WebRTC really started; fail fast so systemd can restart the service.
+sleep 3
+if ! kill -0 "$WEBRTC_PID" 2>/dev/null; then
+    echo "❌ WebRTC process exited right after startup."
+    echo "   Check service logs: sudo journalctl -u nutricycle.service -n 200 --no-pager"
+    exit 1
+fi
+
 echo ""
 echo "✅ WebRTC server started (PID: $WEBRTC_PID)"
 echo ""
@@ -145,5 +153,5 @@ echo "To stop: killall python3 ngrok (or Ctrl+C)"
 echo "To view logs: journalctl -f (if running as systemd service)"
 echo ""
 
-# Wait for all background processes
-wait
+# Keep service tied to the WebRTC process. If it exits, systemd will restart.
+wait "$WEBRTC_PID"
