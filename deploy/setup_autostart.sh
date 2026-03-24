@@ -39,11 +39,15 @@ SERVICE_CONTENT="[Unit]
 Description=NutriCycle auto start
 After=network-online.target
 Wants=network-online.target
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
 
 [Service]
 Type=simple
 User=${SERVICE_USER}
+SupplementaryGroups=video
 WorkingDirectory=${DEPLOY_DIR}
+ExecStartPre=/bin/sleep 8
 ExecStart=/bin/bash -lc 'source ${VENV_DIR}/bin/activate; exec /bin/bash ${START_SCRIPT}'
 Restart=always
 RestartSec=5

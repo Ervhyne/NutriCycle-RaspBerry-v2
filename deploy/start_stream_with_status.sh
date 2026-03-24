@@ -54,12 +54,24 @@ pkill -f webrtc_server.py || true
 pkill -f ngrok || true
 sleep 1
 
-# Check camera access
+# Check camera access (retry on boot because camera device can appear late)
 echo "📹 Checking camera access..."
-if ! ls /dev/video* 1> /dev/null 2>&1; then
-    echo "❌ No camera found! Connect your camera and try again."
+CAMERA_WAIT_SECONDS="${CAMERA_WAIT_SECONDS:-25}"
+camera_ready=0
+for ((i=1; i<=CAMERA_WAIT_SECONDS; i++)); do
+    if ls /dev/video* 1> /dev/null 2>&1; then
+        camera_ready=1
+        break
+    fi
+    echo "   Waiting for camera device... (${i}/${CAMERA_WAIT_SECONDS})"
+    sleep 1
+done
+
+if [ "$camera_ready" -ne 1 ]; then
+    echo "❌ No camera found after ${CAMERA_WAIT_SECONDS}s. Connect camera and reboot or restart service."
     exit 1
 fi
+
 echo "✅ Camera devices found: $(ls /dev/video* | tr '\n' ' ')"
 
 # Verify user is in video group
