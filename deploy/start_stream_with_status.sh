@@ -94,6 +94,8 @@ WEBRTC_PORT="${WEBRTC_PORT:-8080}"
 INFERENCE_IMGSZ="${INFERENCE_IMGSZ:-320}"
 AUTO_CAMERA_PROBE="${AUTO_CAMERA_PROBE:-true}"
 CAMERA_PROBE_MAX_INDEX="${CAMERA_PROBE_MAX_INDEX:-4}"
+NGROK_REQUIRED="${NGROK_REQUIRED:-true}"
+NGROK_READY_TIMEOUT="${NGROK_READY_TIMEOUT:-20}"
 
 # Resolve camera source robustly on boot. Prefer configured source first, then probe indices.
 CAMERA_SOURCE="$VIDEO_SOURCE"
@@ -189,11 +191,45 @@ if command -v ngrok &> /dev/null; then
     echo "🌐 Starting ngrok tunnel..."
     ngrok http "$WEBRTC_PORT" --log=stdout &
     NGROK_PID=$!
-    echo "   Check ngrok output above for public https URL"
-    sleep 2
+    echo "   Waiting for ngrok public URL (timeout: ${NGROK_READY_TIMEOUT}s)..."
+
+    NGROK_PUBLIC_URL=""
+    for ((i=1; i<=NGROK_READY_TIMEOUT; i++)); do
+        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ ngrok process exited during startup."
+            break
+        fi
+
+        if command -v curl &> /dev/null; then
+            NGROK_PUBLIC_URL=$(curl -fsS http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((t.get('public_url','') for t in d.get('tunnels',[]) if str(t.get('public_url','')).startswith('https://')), ''))" 2>/dev/null || true)
+            if [ -n "$NGROK_PUBLIC_URL" ]; then
+                break
+            fi
+        fi
+
+        sleep 1
+    done
+
+    if [ -n "$NGROK_PUBLIC_URL" ]; then
+        echo "✅ ngrok public URL: $NGROK_PUBLIC_URL"
+    else
+        echo "⚠️  ngrok started but no public URL detected yet."
+        if [ "${NGROK_REQUIRED,,}" = "true" ]; then
+            echo "❌ NGROK_REQUIRED=true, exiting so systemd can retry after network is ready."
+            kill "$WEBRTC_PID" 2>/dev/null || true
+            wait "$WEBRTC_PID" 2>/dev/null || true
+            exit 1
+        fi
+    fi
 else
     echo "ℹ️  ngrok not found - public access disabled"
     echo "   To enable: curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.sh | bash"
+    if [ "${NGROK_REQUIRED,,}" = "true" ]; then
+        echo "❌ NGROK_REQUIRED=true but ngrok is not installed."
+        kill "$WEBRTC_PID" 2>/dev/null || true
+        wait "$WEBRTC_PID" 2>/dev/null || true
+        exit 1
+    fi
 fi
 
 echo ""
