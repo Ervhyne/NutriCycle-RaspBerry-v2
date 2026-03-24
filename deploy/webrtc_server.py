@@ -147,6 +147,54 @@ def _env_optional_int(name: str) -> int | None:
         return None
 
 
+def _parse_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _build_ice_servers_for_json() -> list[dict]:
+    servers: list[dict] = []
+
+    for url in getattr(args, "ice_stun_urls", []):
+        servers.append({"urls": [url]})
+
+    turn_url = getattr(args, "ice_turn_url", None)
+    turn_username = getattr(args, "ice_turn_username", None)
+    turn_password = getattr(args, "ice_turn_password", None)
+    if turn_url and turn_username and turn_password:
+        servers.append(
+            {
+                "urls": [turn_url],
+                "username": turn_username,
+                "credential": turn_password,
+            }
+        )
+
+    return servers
+
+
+def _build_ice_servers_for_aiortc() -> list[RTCIceServer]:
+    servers: list[RTCIceServer] = []
+
+    for url in getattr(args, "ice_stun_urls", []):
+        servers.append(RTCIceServer(urls=[url]))
+
+    turn_url = getattr(args, "ice_turn_url", None)
+    turn_username = getattr(args, "ice_turn_username", None)
+    turn_password = getattr(args, "ice_turn_password", None)
+    if turn_url and turn_username and turn_password:
+        servers.append(
+            RTCIceServer(
+                urls=[turn_url],
+                username=turn_username,
+                credential=turn_password,
+            )
+        )
+
+    return servers
+
+
 def _load_device_state() -> dict:
     try:
         if STATE_FILE.exists():
@@ -569,16 +617,12 @@ async def offer(request):
     """Handle WebRTC offer from client."""
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
-    
-    # ICE servers for internet connectivity (STUN/TURN)
-    ice_servers = [
-        RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
-        RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
-        RTCIceServer(urls=["stun:stun2.l.google.com:19302"]),
-        RTCIceServer(urls=["stun:stun.relay.metered.ca:80"]),
-    ]
-    
-    configuration = RTCConfiguration(iceServers=ice_servers)
+
+    ice_servers = _build_ice_servers_for_aiortc()
+    configuration = RTCConfiguration(
+        iceServers=ice_servers,
+        iceTransportPolicy="relay" if getattr(args, "ice_force_relay", False) else "all",
+    )
     pc = RTCPeerConnection(configuration=configuration)
     pcs.add(pc)
     
@@ -1330,11 +1374,35 @@ def main():
     parser.add_argument("--mqtt-qos", type=int, default=_env_int("MQTT_QOS", 1), help="MQTT QoS")
     parser.add_argument("--control-token", default=os.environ.get("CONTROL_TOKEN", None), help="Bearer token required for /control HTTP POSTs")
     parser.add_argument("--server-url", default=os.environ.get("SERVER_URL", "http://localhost:4000"), help="URL of NutriCycle server for batch creation")
+    parser.add_argument(
+        "--ice-stun-urls",
+        default=os.environ.get(
+            "ICE_STUN_URLS",
+            "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:stun2.l.google.com:19302,stun:stun.relay.metered.ca:80",
+        ),
+        help="Comma-separated STUN URLs for ICE",
+    )
+    parser.add_argument("--ice-turn-url", default=os.environ.get("ICE_TURN_URL", None), help="TURN URL for ICE relay")
+    parser.add_argument("--ice-turn-username", default=os.environ.get("ICE_TURN_USERNAME", None), help="TURN username")
+    parser.add_argument("--ice-turn-password", default=os.environ.get("ICE_TURN_PASSWORD", None), help="TURN password")
+    parser.add_argument("--ice-force-relay", action="store_true", default=_env_bool("ICE_FORCE_RELAY", False), help="Force relay-only ICE candidates (requires TURN)")
 
     args = parser.parse_args(remaining_argv)
 
     # Clamp line position so bad values don't break trigger logic.
     args.trigger_line_y = max(0.0, min(1.0, float(args.trigger_line_y)))
+    args.ice_stun_urls = _parse_csv(args.ice_stun_urls)
+
+    if not args.ice_stun_urls:
+        args.ice_stun_urls = ["stun:stun.l.google.com:19302"]
+
+    if args.ice_turn_url and not (args.ice_turn_username and args.ice_turn_password):
+        logger.warning("ICE_TURN_URL provided without ICE_TURN_USERNAME/ICE_TURN_PASSWORD; TURN will be ignored")
+
+    logger.info(f"ICE STUN servers: {args.ice_stun_urls}")
+    if args.ice_turn_url and args.ice_turn_username and args.ice_turn_password:
+        logger.info(f"ICE TURN server enabled: {args.ice_turn_url}")
+    logger.info(f"ICE transport policy: {'relay' if args.ice_force_relay else 'all'}")
     
     # Parse source
     args.source = int(args.source) if args.source.isdigit() else args.source
@@ -1554,6 +1622,17 @@ def main():
         })
 
     app.router.add_get('/status', status_handler)
+
+    async def ice_config_handler(request):
+        """Return ICE configuration for browser clients."""
+        return web.json_response(
+            {
+                'iceServers': _build_ice_servers_for_json(),
+                'iceTransportPolicy': 'relay' if getattr(args, 'ice_force_relay', False) else 'all',
+            }
+        )
+
+    app.router.add_get('/ice-config', ice_config_handler)
 
     async def last_frame_handler(request):
         """Return the latest annotated frame as JPEG for quick previews."""

@@ -69,9 +69,23 @@
           pc = null;
         }
 
-        pc = new RTCPeerConnection({
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
+        let rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        try {
+          const cfgResp = await fetch('/ice-config', { cache: 'no-store' });
+          if (cfgResp.ok) {
+            const cfg = await cfgResp.json();
+            if (cfg && Array.isArray(cfg.iceServers) && cfg.iceServers.length > 0) {
+              rtcConfig = {
+                iceServers: cfg.iceServers,
+                iceTransportPolicy: cfg.iceTransportPolicy || 'all'
+              };
+            }
+          }
+        } catch (e) {
+          // fallback to default STUN-only config
+        }
+
+        pc = new RTCPeerConnection(rtcConfig);
 
         pc.addEventListener('track', (evt) => {
           if (evt.track.kind === 'video') {
