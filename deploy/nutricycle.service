@@ -1,0 +1,15 @@
+[Unit]
+Description=NutriCycle auto start
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nutricycle
+WorkingDirectory=/home/nutricycle/NutriCycle-RaspBerry-v2/deploy
+ExecStart=/bin/bash -lc 'source /home/nutricycle/yolo/venv/bin/activate; exec /bin/bash /home/nutricycle/NutriCycle-RaspBerry-v2/deploy/start_stream_with_status.sh'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
