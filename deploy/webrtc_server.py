@@ -735,8 +735,6 @@ def main():
         mqtt_esp_topic = getattr(args, 'mqtt_esp_topic', 'nutricycle/esp32')
         mqtt_control_topic = getattr(args, 'mqtt_control_topic', 'nutricycle/rpi/control/+')
         mqtt_esp_command_topic = getattr(args, 'mqtt_esp_command_topic', 'nutricycle/esp32/{machineId}/command')
-        mqtt_esp32_ack_topic = getattr(args, 'mqtt_esp32_ack_topic', 'nutricycle/esp32/+/ack')
-        mqtt_emergency_ack_topic = getattr(args, 'mqtt_emergency_ack_topic', 'nutricycle/rpi/ack')
         mqtt_port = getattr(args, 'mqtt_port', 1883)
         mqtt_qos = getattr(args, 'mqtt_qos', 1)
         server_url = getattr(args, 'server_url', 'http://localhost:4000')
@@ -838,44 +836,6 @@ def main():
                 app_ref.pop('camera_keepalive_task', None)
             await SharedCamera.release_instance()
 
-        def publish_emergency_ack(command_id: str | None, stage: str, ok: bool, error: str | None = None):
-            if not command_id or not mqtt_client:
-                return
-
-            ack_payload = {
-                'commandId': command_id,
-                'machineId': machine_id,
-                'ackStage': stage,
-                'success': ok,
-                'timestamp': time.time(),
-            }
-            if error:
-                ack_payload['error'] = error
-            try:
-                mqtt_client.publish(mqtt_emergency_ack_topic, json.dumps(ack_payload), qos=mqtt_qos)
-            except Exception as e:
-                logger.warning(f"Failed to publish emergency ACK: {e}")
-
-        def on_esp32_ack(client, userdata, message):
-            """Handle ACK messages from ESP32 for command correlation."""
-            try:
-                payload = json.loads(message.payload.decode())
-                command_id = payload.get('commandId') or payload.get('command_id')
-                if not command_id:
-                    return
-
-                target_machine = payload.get('machineId') or payload.get('machine_id')
-                if target_machine and machine_id and target_machine != machine_id:
-                    return
-
-                ok = bool(payload.get('success', True))
-                if ok:
-                    publish_emergency_ack(command_id, 'esp32_received', True)
-                else:
-                    publish_emergency_ack(command_id, 'esp32_received', False, payload.get('error') or 'ESP32 reported emergency stop failure')
-            except Exception as e:
-                logger.error(f"Error processing ESP32 ACK message: {e}", exc_info=True)
-
         # Callback for handling incoming MQTT control commands
         def on_esp32_control(client, userdata, message):
             # No machine_status changes here; only batch_states are updated
@@ -883,23 +843,17 @@ def main():
             try:
                 topic = message.topic
                 if topic != mqtt_control_topic and '/rpi/control/' not in topic:
-                    if '/esp32/' in topic and topic.endswith('/ack'):
-                        on_esp32_ack(client, userdata, message)
-                        return
                     logger.debug(f"Ignoring MQTT message from non-control topic: {topic}")
                     return
 
                 payload = json.loads(message.payload.decode())
                 command = payload.get('command')
-                command_id = payload.get('commandId') or payload.get('command_id')
                 # Aliases and more specific stage names
                 if command == 'completion':
                     command = 'feed_completed'
                 logger.info(f"Received ESP32 command via MQTT: {command}")
 
                 if command == 'emergency_stop':
-                    publish_emergency_ack(command_id, 'pi_received', True)
-
                     async def handle_emergency_stop():
                         try:
                             await stop_local_keepalive_now(app)
@@ -911,22 +865,17 @@ def main():
                             forward_payload = {
                                 'machine_id': target_machine,
                                 'command': 'emergency_stop',
-                                'commandId': command_id,
                                 'batchNumber': payload.get('batchNumber'),
                                 'timestamp': time.time(),
                             }
 
                             if mqtt_client:
                                 mqtt_client.publish(esp_topic, json.dumps(forward_payload), qos=mqtt_qos)
-                                publish_emergency_ack(command_id, 'esp32_dispatched', True)
-                            else:
-                                publish_emergency_ack(command_id, 'esp32_dispatched', False, 'MQTT client unavailable')
 
                             batch_number = payload.get('batchNumber') or _get_last_batch_number(machine_id)
                             if batch_number:
                                 await patch_batch_status(batch_number, 'idle', server_url)
                         except Exception as inner_error:
-                            publish_emergency_ack(command_id, 'esp32_dispatched', False, str(inner_error))
                             logger.error(f"Emergency stop handling failed: {inner_error}", exc_info=True)
 
                     asyncio.run_coroutine_threadsafe(handle_emergency_stop(), loop)
@@ -1143,8 +1092,6 @@ def main():
                 # Subscribe to ESP32 control topic
                 mqtt_client.subscribe(mqtt_control_topic, qos=mqtt_qos)
                 logger.info(f"Subscribed to MQTT topic: {mqtt_control_topic}")
-                mqtt_client.subscribe(mqtt_esp32_ack_topic, qos=mqtt_qos)
-                logger.info(f"Subscribed to MQTT topic: {mqtt_esp32_ack_topic}")
 
                 mqtt_client.loop_start()
                 app['mqtt_client'] = mqtt_client  # store on app for control handler
@@ -1347,8 +1294,6 @@ def main():
     parser.add_argument("--mqtt-esp-topic", default=os.environ.get("MQTT_ESP_TOPIC", "nutricycle/esp32"), help="MQTT topic to send compact alerts to ESP32")
     parser.add_argument("--mqtt-control-topic", default=os.environ.get("MQTT_CONTROL_TOPIC", "nutricycle/rpi/control/+"), help="MQTT topic to receive control commands for this Raspberry Pi")
     parser.add_argument("--mqtt-esp-command-topic", default=os.environ.get("MQTT_ESP_COMMAND_TOPIC", "nutricycle/esp32/{machineId}/command"), help="MQTT topic template for forwarding machine commands to ESP32")
-    parser.add_argument("--mqtt-esp32-ack-topic", default=os.environ.get("MQTT_ESP32_ACK_TOPIC", "nutricycle/esp32/+/ack"), help="MQTT topic pattern for ACK messages from ESP32")
-    parser.add_argument("--mqtt-emergency-ack-topic", default=os.environ.get("MQTT_EMERGENCY_ACK_TOPIC", "nutricycle/rpi/ack"), help="MQTT topic for emergency stop acknowledgements back to server")
     parser.add_argument("--mqtt-username", default=os.environ.get("MQTT_USERNAME", None), help="MQTT username")
     parser.add_argument("--mqtt-password", default=os.environ.get("MQTT_PASSWORD", None), help="MQTT password")
     parser.add_argument("--mqtt-qos", type=int, default=_env_int("MQTT_QOS", 1), help="MQTT QoS")
