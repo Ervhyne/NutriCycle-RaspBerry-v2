@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -619,10 +620,7 @@ async def offer(request):
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
     ice_servers = _build_ice_servers_for_aiortc()
-    configuration = RTCConfiguration(
-        iceServers=ice_servers,
-        iceTransportPolicy="relay" if getattr(args, "ice_force_relay", False) else "all",
-    )
+    configuration = RTCConfiguration(iceServers=ice_servers)
     pc = RTCPeerConnection(configuration=configuration)
     pcs.add(pc)
     
@@ -1644,6 +1642,52 @@ def main():
         return web.Response(body=data, content_type='image/jpeg', headers=headers)
 
     app.router.add_get('/last_frame.jpg', last_frame_handler)
+
+    async def mjpeg_handler(request):
+        """Serve latest frames as MJPEG over HTTP (fallback when WebRTC fails)."""
+        boundary = 'frame'
+        resp = web.StreamResponse(
+            status=200,
+            reason='OK',
+            headers={
+                'Content-Type': f'multipart/x-mixed-replace; boundary={boundary}',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Connection': 'keep-alive',
+            },
+        )
+        await resp.prepare(request)
+
+        # Tiny black placeholder while first annotated frame is not available yet.
+        placeholder = np.zeros((240, 320, 3), dtype=np.uint8)
+        cv2.putText(placeholder, 'Waiting for frame...', (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        ok, buf = cv2.imencode('.jpg', placeholder)
+        placeholder_jpeg = buf.tobytes() if ok else b''
+
+        try:
+            while True:
+                async with latest_frame_lock:
+                    data = globals().get('latest_frame_jpeg')
+                if not data:
+                    data = placeholder_jpeg
+
+                chunk = (
+                    f'--{boundary}\r\n'
+                    'Content-Type: image/jpeg\r\n'
+                    f'Content-Length: {len(data)}\r\n\r\n'
+                ).encode('ascii') + data + b'\r\n'
+
+                await resp.write(chunk)
+                await asyncio.sleep(0.25)
+        except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                await resp.write_eof()
+
+        return resp
+
+    app.router.add_get('/mjpeg', mjpeg_handler)
 
     async def _start_background_tasks(app):
         app['announce_task'] = asyncio.create_task(announce_task(app))

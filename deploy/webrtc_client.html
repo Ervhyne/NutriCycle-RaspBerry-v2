@@ -36,6 +36,15 @@
     const overlay = document.getElementById('tapOverlay');
     let pc = null;
     let previewInterval = null;
+    let reconnectFailures = 0;
+
+    function activateMjpegFallback() {
+      stopPreviewLoop();
+      preview.style.display = 'block';
+      // Add timestamp to avoid stale cache when reconnecting.
+      preview.src = '/mjpeg?ts=' + Date.now();
+      console.warn('WebRTC fallback activated: using /mjpeg stream');
+    }
 
     async function fetchPreview() {
       try {
@@ -89,6 +98,7 @@
 
         pc.addEventListener('track', (evt) => {
           if (evt.track.kind === 'video') {
+            reconnectFailures = 0;
             stopPreviewLoop();
             const stream = evt.streams[0];
             video.srcObject = stream;
@@ -104,8 +114,13 @@
           console.log('Connection state:', pc.connectionState);
           if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
             // fall back to preview and attempt reconnect
+            reconnectFailures += 1;
             preview.style.display = 'block';
-            startPreviewLoop();
+            if (reconnectFailures >= 3) {
+              activateMjpegFallback();
+            } else {
+              startPreviewLoop();
+            }
             setTimeout(() => startConnection(), 1000);
           }
         });
@@ -128,8 +143,13 @@
       } catch (err) {
         console.error('WebRTC start failed', err);
         // keep preview running and retry
+        reconnectFailures += 1;
         preview.style.display = 'block';
-        startPreviewLoop();
+        if (reconnectFailures >= 3) {
+          activateMjpegFallback();
+        } else {
+          startPreviewLoop();
+        }
         setTimeout(() => startConnection(), 1500);
       }
     }
