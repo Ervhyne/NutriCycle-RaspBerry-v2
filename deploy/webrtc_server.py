@@ -1738,8 +1738,11 @@ def main():
     async def _start_background_tasks(app):
         app['announce_task'] = asyncio.create_task(announce_task(app))
         app['event_broadcaster_task'] = asyncio.create_task(event_broadcaster(app))
-        if getattr(args, 'persistent', False):
+        auto_persistent = getattr(args, 'persistent', False) or bool(getattr(args, 'mqtt_broker', None))
+        if auto_persistent:
             app['camera_keepalive_task'] = asyncio.create_task(camera_keepalive(app))
+            mode = "explicit" if getattr(args, 'persistent', False) else "auto-mqtt"
+            logger.info(f"Camera keepalive enabled ({mode} mode)")
 
     async def _cleanup_background_tasks(app):
         # Cancel background tasks
