@@ -825,7 +825,15 @@ def main():
             except Exception as e:
                 logger.error(f"Failed to patch batch status: {e}", exc_info=True)
 
-        async def stop_local_keepalive_now(app_ref):
+        async def start_local_keepalive_now(app_ref, reason: str = 'command'):
+            if app_ref.get('camera_keepalive_task'):
+                logger.info(f"Keepalive already running ({reason})")
+                return
+
+            app_ref['camera_keepalive_task'] = asyncio.create_task(camera_keepalive(app_ref))
+            logger.info(f"Started keepalive ({reason})")
+
+        async def stop_local_keepalive_now(app_ref, reason: str = 'command'):
             t = app_ref.get('camera_keepalive_task')
             if t:
                 t.cancel()
@@ -834,6 +842,7 @@ def main():
                 except Exception:
                     pass
                 app_ref.pop('camera_keepalive_task', None)
+                logger.info(f"Stopped keepalive ({reason})")
             await SharedCamera.release_instance()
 
         # Callback for handling incoming MQTT control commands
@@ -856,7 +865,7 @@ def main():
                 if command == 'emergency_stop':
                     async def handle_emergency_stop():
                         try:
-                            await stop_local_keepalive_now(app)
+                            await stop_local_keepalive_now(app, reason='emergency_stop')
 
                             target_machine = payload.get('machineId') or machine_id
                             if not target_machine:
@@ -931,6 +940,8 @@ def main():
 
                 if command == 'start':
                     async def handle_start():
+                        await start_local_keepalive_now(app, reason='start_command')
+
                         # Prefer tokenless device control endpoint to create/resume and return batchNumber.
                         data = await _post_device_control('start', machine_id, server_url)
                         server_batch = (data or {}).get('batchNumber')
@@ -951,19 +962,39 @@ def main():
                             logger.warning("Start sent but no batchNumber available")
                     asyncio.run_coroutine_threadsafe(handle_start(), loop)
                 elif command == 'stop' and batch_number:
+                    asyncio.run_coroutine_threadsafe(
+                        stop_local_keepalive_now(app, reason='stop_command'),
+                        loop,
+                    )
+
                     # Mark batch as idle (not finished, can be resumed)
                     if batch_number in batch_states:
                         batch_states[batch_number]['status'] = 'idle'
                         batch_states[batch_number]['in_progress'] = False
                         batch_states[batch_number]['finished'] = False
                         # Do not mark as finished, so it can be resumed
+                elif command == 'stop':
+                    asyncio.run_coroutine_threadsafe(
+                        stop_local_keepalive_now(app, reason='stop_command'),
+                        loop,
+                    )
                 elif command in ('feed_completed', 'reset') and batch_number:
+                    asyncio.run_coroutine_threadsafe(
+                        stop_local_keepalive_now(app, reason='batch_completed'),
+                        loop,
+                    )
+
                     # Mark as finished
                     machine_status = 'finished'
                     if batch_number in batch_states:
                         batch_states[batch_number]['finished'] = True
                         batch_states[batch_number]['in_progress'] = False
                         batch_states[batch_number]['status'] = 'finished'
+                elif command in ('feed_completed', 'reset'):
+                    asyncio.run_coroutine_threadsafe(
+                        stop_local_keepalive_now(app, reason='batch_completed'),
+                        loop,
+                    )
 
                 # --- ORIGINAL LOGIC ---
                 if command in ('start', 'stop', 'sorting', 'sorting_compost', 'sorting_animal_feed', 'grinding', 'dehydration', 'feed_completed'):
