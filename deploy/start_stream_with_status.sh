@@ -84,8 +84,64 @@ fi
 
 cd "$DEPLOY_DIR"
 
+# Runtime configuration (defaults are safe for existing setup)
+MODEL_PATH="${MODEL_PATH:-models/best.onnx}"
+VIDEO_SOURCE="${VIDEO_SOURCE:-0}"
+CONFIDENCE="${CONFIDENCE:-0.5}"
+FLIP_MODE="${FLIP_MODE:-vertical}"
+WEBRTC_HOST="${WEBRTC_HOST:-0.0.0.0}"
+WEBRTC_PORT="${WEBRTC_PORT:-8080}"
+INFERENCE_IMGSZ="${INFERENCE_IMGSZ:-320}"
+AUTO_CAMERA_PROBE="${AUTO_CAMERA_PROBE:-true}"
+CAMERA_PROBE_MAX_INDEX="${CAMERA_PROBE_MAX_INDEX:-4}"
+
+# Resolve camera source robustly on boot. Prefer configured source first, then probe indices.
+CAMERA_SOURCE="$VIDEO_SOURCE"
+if [[ "$VIDEO_SOURCE" =~ ^[0-9]+$ ]] && [[ "${AUTO_CAMERA_PROBE,,}" == "true" ]]; then
+    echo "🔎 Probing camera source (preferred: $VIDEO_SOURCE)..."
+    if PROBED_SOURCE=$(python3 - "$VIDEO_SOURCE" "$CAMERA_PROBE_MAX_INDEX" <<'PY'
+import sys
+import time
+import cv2
+
+preferred = int(sys.argv[1])
+max_index = int(sys.argv[2])
+
+order = [preferred] + [i for i in range(max_index + 1) if i != preferred]
+for idx in order:
+    cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        cap.release()
+        continue
+
+    ok = False
+    for _ in range(8):
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.size > 0:
+            ok = True
+            break
+        time.sleep(0.08)
+
+    cap.release()
+    if ok:
+        print(idx)
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+); then
+        CAMERA_SOURCE="$PROBED_SOURCE"
+        echo "✅ Camera source selected: $CAMERA_SOURCE"
+    else
+        echo "⚠️  Camera probe failed. Falling back to configured source: $VIDEO_SOURCE"
+    fi
+else
+    echo "ℹ️  Camera source fixed from config: $CAMERA_SOURCE"
+fi
+
 # Start WebRTC server with status update configuration
-echo "📹 Starting WebRTC server on port 8080..."
+echo "📹 Starting WebRTC server on port $WEBRTC_PORT..."
+echo "   Camera source: $CAMERA_SOURCE"
 echo "   Machine ID: $MACHINE_ID"
 if [ -n "$API_BASE_URL" ] && [ -n "$MACHINE_SECRET" ]; then
     echo "   API: $API_BASE_URL"
@@ -96,12 +152,13 @@ fi
 echo ""
 
 python3 webrtc_server.py \
-  --model models/best.onnx \
-  --source 0 \
-  --conf 0.5 \
-  --flip vertical \
-  --port 8080 \
-  --host 0.0.0.0 \
+    --model "$MODEL_PATH" \
+    --source "$CAMERA_SOURCE" \
+    --conf "$CONFIDENCE" \
+    --flip "$FLIP_MODE" \
+    --port "$WEBRTC_PORT" \
+    --host "$WEBRTC_HOST" \
+    --imgsz "$INFERENCE_IMGSZ" \
   --machine-id "$MACHINE_ID" \
   --api-base-url "$API_BASE_URL" \
   --machine-secret "$MACHINE_SECRET" \
@@ -123,14 +180,14 @@ fi
 echo ""
 echo "✅ WebRTC server started (PID: $WEBRTC_PID)"
 echo ""
-echo "📱 Local access: http://raspberrypi.local:8080"
-echo "   or: http://$(hostname -I | awk '{print $1}'):8080"
+echo "📱 Local access: http://raspberrypi.local:$WEBRTC_PORT"
+echo "   or: http://$(hostname -I | awk '{print $1}'):$WEBRTC_PORT"
 echo ""
 
 # Optional: Start ngrok tunnel for internet access
 if command -v ngrok &> /dev/null; then
     echo "🌐 Starting ngrok tunnel..."
-    ngrok http 8080 --log=stdout &
+    ngrok http "$WEBRTC_PORT" --log=stdout &
     NGROK_PID=$!
     echo "   Check ngrok output above for public https URL"
     sleep 2
