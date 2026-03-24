@@ -33,6 +33,7 @@ args = None
 model = None
 shared_camera = None  # Singleton camera instance
 model_is_onnx = False
+model_is_ncnn = False
 
 # Event queue for detection events
 from asyncio import Queue
@@ -313,6 +314,12 @@ def _run_model_inference(frame, conf_threshold: float, imgsz: int):
     return model(frame, conf=conf_threshold, imgsz=imgsz, verbose=False)
 
 
+def _is_ncnn_export_path(path: str) -> bool:
+    """Return True when path points to an Ultralytics NCNN export directory."""
+    p = Path(path)
+    return p.is_dir() and (p / "model.ncnn.param").exists() and (p / "model.ncnn.bin").exists()
+
+
 def _normalize_xyxy(xyxy) -> list[float] | None:
     """Normalize YOLO bbox output into [x1, y1, x2, y2]."""
     try:
@@ -510,6 +517,7 @@ class YOLOVideoTrack(VideoStreamTrack):
         self.width = camera.width
         self.height = camera.height
         self.fps = camera.fps
+        self.measured_fps = camera.fps
         
         self.frame_count = 0
         self.last_fps_time = time.time()
@@ -597,9 +605,10 @@ class YOLOVideoTrack(VideoStreamTrack):
                 fps = self.fps_counter / (current_time - self.last_fps_time)
                 self.last_fps_time = current_time
                 self.fps_counter = 0
+                self.measured_fps = fps
                 logger.info(f"Streaming at {fps:.1f} FPS, inference: {inference_time*1000:.0f}ms")
             else:
-                fps = self.fps
+                fps = self.measured_fps
             
             cv2.putText(
                 annotated,
@@ -720,7 +729,7 @@ async def on_shutdown(app):
 
 
 def main():
-    global args, model, model_is_onnx
+    global args, model, model_is_onnx, model_is_ncnn
 
     # MQTT client (optional)
     mqtt_client = None
@@ -1180,7 +1189,11 @@ def main():
         if mqtt_broker:
             try:
                 import paho.mqtt.client as paho
-                mqtt_client = paho.Client()
+                callback_api = getattr(getattr(paho, 'CallbackAPIVersion', None), 'VERSION2', None)
+                if callback_api is not None:
+                    mqtt_client = paho.Client(callback_api_version=callback_api)
+                else:
+                    mqtt_client = paho.Client()
                 if getattr(args, 'mqtt_username', None):
                     mqtt_client.username_pw_set(getattr(args, 'mqtt_username'), getattr(args, 'mqtt_password', None))
 
@@ -1354,7 +1367,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="WebRTC YOLO streaming server", parents=[bootstrap_parser])
     parser.add_argument("--model", default=os.environ.get("MODEL_PATH", "AI-Model/runs/detect/nutricycle_foreign_only/weights/best.pt"),
-                        help="Path to YOLO model (.pt or .onnx)")
+                        help="Path to YOLO model (.pt, .onnx, or NCNN export directory)")
     parser.add_argument("--source", default=os.environ.get("VIDEO_SOURCE", "0"), help="Camera index or video file path")
     parser.add_argument("--conf", type=float, default=_env_float("CONFIDENCE", 0.5), help="Confidence threshold")
     parser.add_argument("--flip", choices=['none', 'vertical', 'horizontal', '180'], default=os.environ.get("FLIP_MODE", "none"),
@@ -1456,12 +1469,18 @@ def main():
                 logger.error("onnxruntime not installed and no .pt fallback found")
                 sys.exit(1)
     
+    model_is_ncnn = _is_ncnn_export_path(model_path)
     logger.info(f"Loading model: {model_path}")
-    model = YOLO(model_path)
+    if model_is_ncnn:
+        model = YOLO(model_path, task='detect')
+    else:
+        model = YOLO(model_path)
     model_is_onnx = model_path.lower().endswith('.onnx')
     logger.info(f"Model loaded. Classes: {model.names}")
     if model_is_onnx:
         logger.info("ONNX model detected: ignoring --imgsz at runtime to avoid fixed-shape mismatch")
+    if model_is_ncnn:
+        logger.info("NCNN model detected: running detect task with Ultralytics NCNN backend")
 
     if args.line_trigger_enabled:
         trig_conf = args.trigger_min_conf if args.trigger_min_conf is not None else args.conf
