@@ -1085,7 +1085,8 @@ def main():
                                 logger.error("Sorting received but cannot resolve batchNumber")
                                 return
                             logger.info(f"{command} received; using latest batch {resolved}. Posting to server now.")
-                            await post_stage_update(command, resolved, server_url, machine_id)
+                            stage_value = payload.get('stage') or command
+                            await post_stage_update(stage_value, resolved, server_url, machine_id)
                         asyncio.run_coroutine_threadsafe(handle_sorting(), loop)
                     elif command in ('grinding', 'dehydration', 'feed_completed'):
                         async def handle_stage_patch():
@@ -1094,7 +1095,8 @@ def main():
                                 logger.error(f"{command} received but cannot resolve batchNumber")
                                 return
                             logger.info(f"{command} received; using latest batch {resolved}. Posting to server now.")
-                            await post_stage_update(command, resolved, server_url, machine_id)
+                            stage_value = payload.get('stage') or command
+                            await post_stage_update(stage_value, resolved, server_url, machine_id)
 
                         asyncio.run_coroutine_threadsafe(handle_stage_patch(), loop)
                     elif command == 'start':
@@ -1129,7 +1131,12 @@ def main():
             - /batches/{batch}/process may not exist
             So we patch the batch directly with feedStatus using x-machine-id header.
             """
-            await patch_batch_feed_status(server_url, batch_number, stage, machine_id)
+            normalized_stage = (stage or '').strip().lower()
+            if normalized_stage == 'dehydration':
+                normalized_stage = 'dehydrating'
+            elif normalized_stage == 'feed_completed':
+                normalized_stage = 'completed'
+            await patch_batch_feed_status(server_url, batch_number, normalized_stage, machine_id)
 
 
         async def patch_batch_fields(batch_number: str, fields: dict, server_url: str, machine_id: str | None):
